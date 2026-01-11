@@ -1,0 +1,13 @@
+[package]
+name = "rmh-core"
+description = "Core types and shared utilities for RustMediaHub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }

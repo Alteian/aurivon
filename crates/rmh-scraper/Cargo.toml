@@ -1,0 +1,53 @@
+[package]
+name = "rmh-scraper"
+description = "Scraper addon for RustMediaHub - finds streams from various sources with Real-Debrid support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# Internal crates
+rmh-core = { workspace = true }
+rmh-addon = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# HTTP client for scraping and Real-Debrid API
+reqwest = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Async trait
+async-trait = "0.1"
+
+# HTML parsing for scraping
+scraper = "0.22"
+
+# Regex for parsing torrent info
+regex = "1.11"
+
+# URL handling
+url = "2.5"
+
+# Time utilities
+chrono = { workspace = true }
+
+# Base64 for API
+base64 = "0.22"
+
+# Caching scraped results
+moka = { version = "0.12", features = ["future"] }
+
+# Fuzzy matching for title comparison
+strsim = "0.11"

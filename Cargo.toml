@@ -1,0 +1,115 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rmh-core",
+    "crates/rmh-database",
+    "crates/rmh-scanner",
+    "crates/rmh-metadata",
+    "crates/rmh-player",
+    "crates/rmh-addon",
+    "crates/rmh-torrent",
+    "crates/rmh-scraper",
+    "crates/rmh-ui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["RustMediaHub Team"]
+license = "MIT"
+repository = "https://github.com/Alteian/needmediacenter"
+
+[workspace.dependencies]
+# Async Runtime
+tokio = { version = "1.40", features = ["full", "rt-multi-thread", "macros", "sync"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "chrono"] }
+
+# HTTP Client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error Handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# File System
+walkdir = "2.5"
+
+# Date/Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Environment
+dotenvy = "0.15"
+
+# UUID
+uuid = { version = "1.10", features = ["v4", "serde"] }
+
+# GUI - Iced with wgpu for native GPU rendering
+iced = { version = "0.13", features = ["tokio", "image", "advanced"] }
+
+# Image handling
+image = "0.25"
+
+# Async channels
+async-channel = "2.3"
+
+# Directories (for app data path)
+dirs = "5.0"
+
+# Internal crates
+rmh-core = { path = "crates/rmh-core" }
+rmh-database = { path = "crates/rmh-database" }
+rmh-scanner = { path = "crates/rmh-scanner" }
+rmh-metadata = { path = "crates/rmh-metadata" }
+rmh-player = { path = "crates/rmh-player" }
+rmh-addon = { path = "crates/rmh-addon" }
+rmh-torrent = { path = "crates/rmh-torrent" }
+rmh-scraper = { path = "crates/rmh-scraper" }
+rmh-ui = { path = "crates/rmh-ui" }
+
+[package]
+name = "rustmediahub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "A lightweight, performant media center application"
+
+[dependencies]
+rmh-core.workspace = true
+rmh-database.workspace = true
+rmh-scanner.workspace = true
+rmh-metadata.workspace = true
+rmh-player.workspace = true
+rmh-addon.workspace = true
+rmh-ui.workspace = true
+iced.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+dotenvy.workspace = true
+dirs.workspace = true
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = 3
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

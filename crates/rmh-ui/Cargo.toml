@@ -1,0 +1,28 @@
+[package]
+name = "rmh-ui"
+description = "Iced-based native GUI for RustMediaHub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rmh-core = { workspace = true }
+rmh-database = { workspace = true }
+rmh-scanner = { workspace = true }
+rmh-metadata = { workspace = true }
+rmh-player = { workspace = true }
+rmh-torrent = { workspace = true }
+rmh-scraper = { workspace = true }
+rmh-addon = { workspace = true }
+iced = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-channel = { workspace = true }
+image = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }

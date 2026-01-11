@@ -1,0 +1,51 @@
+[package]
+name = "rmh-torrent"
+description = "Torrent streaming engine for RustMediaHub - sequential downloading for instant playback"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# Internal crates
+rmh-core = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# BitTorrent engine with streaming support
+# Using rust-tls for better compatibility (no system openssl dependency)
+# We build our own HTTP server for streaming, so no need for http-api
+librqbit = { version = "8.1", default-features = false, features = ["rust-tls"] }
+
+# HTTP server for streaming to MPV
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors", "fs"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Hex encoding
+hex = "0.4"
+
+# Directories for download cache
+dirs = { workspace = true }
+
+# Async utilities
+futures = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }
+async-trait = "0.1"
+
+# URL/magnet parsing
+url = "2.5"
+
+# Internal - addon system
+rmh-addon = { workspace = true }
