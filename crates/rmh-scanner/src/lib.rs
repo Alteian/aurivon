@@ -1,7 +1,7 @@
-//! File system scanner for video files
+//! File system scanner for video and audio files
 
 use anyhow::{Context, Result};
-use rmh_core::{is_video_file, MediaItem, ScanProgress};
+use rmh_core::{is_media_file, MediaItem, ScanProgress};
 use rmh_database::{Database, MediaRepository};
 use std::path::Path;
 use tokio::sync::mpsc;
@@ -116,7 +116,7 @@ impl Scanner {
                 .and_then(|e| e.to_str())
                 .unwrap_or("");
 
-            if !is_video_file(extension) {
+            if !is_media_file(extension) {
                 continue;
             }
 
@@ -166,7 +166,7 @@ pub fn scan_for_videos(path: &Path) -> Result<Vec<(String, String, i64)>> {
             .and_then(|e| e.to_str())
             .unwrap_or("");
 
-        if !is_video_file(extension) {
+        if !is_media_file(extension) {
             continue;
         }
 
@@ -200,11 +200,12 @@ mod tests {
         // Create test video files
         File::create(dir.path().join("movie.mkv")).unwrap();
         File::create(dir.path().join("video.mp4")).unwrap();
+        File::create(dir.path().join("song.flac")).unwrap();
         File::create(dir.path().join("document.pdf")).unwrap();
 
         let files = scan_for_videos(dir.path()).unwrap();
         
-        assert_eq!(files.len(), 2);
+        assert_eq!(files.len(), 3);
         assert!(files.iter().any(|(_, name, _)| name == "movie.mkv"));
         assert!(files.iter().any(|(_, name, _)| name == "video.mp4"));
     }

@@ -170,7 +170,41 @@ pub const VIDEO_EXTENSIONS: &[&str] = &[
     "mkv", "mp4", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "ts", "m2ts",
 ];
 
+/// Audio file extensions we support
+pub const AUDIO_EXTENSIONS: &[&str] = &[
+    "mp3", "flac", "ogg", "opus", "m4a", "aac", "wav", "wma", "alac", "aiff",
+];
+
 /// Check if a file extension is a supported video format
 pub fn is_video_file(extension: &str) -> bool {
     VIDEO_EXTENSIONS.contains(&extension.to_lowercase().as_str())
+}
+
+/// Check if a file extension is a supported audio format
+pub fn is_audio_file(extension: &str) -> bool {
+    AUDIO_EXTENSIONS.contains(&extension.to_lowercase().as_str())
+}
+
+/// Check if a file extension is any playable media (video or audio)
+pub fn is_media_file(extension: &str) -> bool {
+    is_video_file(extension) || is_audio_file(extension)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_extensions() {
+        assert!(is_video_file("MKV"));
+        assert!(is_audio_file("flac"));
+        assert!(is_media_file("mp3"));
+        assert!(!is_media_file("pdf"));
+    }
+
+    #[test]
+    fn title_from_filename() {
+        let item = MediaItem::from_scan("/x/The_Matrix.1999.mkv".into(), "The_Matrix.1999.mkv".into(), 1);
+        assert_eq!(item.title, "The Matrix 1999");
+    }
 }
