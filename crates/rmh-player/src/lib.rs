@@ -1,41 +1,51 @@
-//! Video player integration using MPV (via IPC)
-//! 
-//! This module uses the `mpv` executable via JSON IPC to ensure robust playback on all displays (X11, Wayland)
-//! without crashing the main application due to FFI/EGL conflicts.
-//! 
+//! UI-agnostic video/audio player built on the `mpv` executable and its JSON IPC.
+//!
+//! The player runs `mpv` as a separate process and talks to it over a Unix
+//! socket (`--input-ipc-server`). This keeps the GUI process isolated from any
+//! FFI/EGL issues and works on X11 and Wayland alike.
+//!
 //! Architecture:
-//! - `Player` struct is a handle with a `Sender` to a background task.
-//! - The background task (Actor) manages the `mpv` process and IPC socket.
-//! - State (position, duration, paused) is shared via `Arc<RwLock>` or `Arc<Mutex>` for synchronous access by UI.
+//! - [`Player`] is a cheap, cloneable handle. Every method is synchronous and
+//!   non-blocking, so it can be driven from any UI toolkit (iced today, GPUI later).
+//! - A background actor runs on its own thread with its own Tokio runtime. It owns
+//!   the `mpv` process and the IPC socket. The handle never depends on the caller's
+//!   async runtime.
+//! - Playback state is mirrored into shared memory and exposed via
+//!   [`Player::snapshot`] for polling.
 
 use anyhow::{Context, Result};
-use serde_json::Value;
-use std::path::Path;
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, RwLock};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration};
-use tracing::{info, error};
+use tokio::time::{sleep, timeout, Duration};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-/// Configuration for MPV player
+/// Configuration for the mpv player
 #[derive(Debug, Clone)]
 pub struct PlayerConfig {
-    /// Hardware decoding mode (auto, vaapi, nvdec, etc.)
+    /// Path or name of the mpv executable
+    pub mpv_path: String,
+    /// Hardware decoding mode (auto, vaapi, nvdec, no, ...)
     pub hwdec: String,
     /// Start in fullscreen mode
     pub fullscreen: bool,
-    /// Show on-screen controller
+    /// Show mpv's own on-screen controller
     pub osc: bool,
-    /// Volume level (0-100)
+    /// Initial volume (0-100)
     pub volume: u8,
-    /// Resume from last position
+    /// Let mpv remember positions itself (`--save-position-on-quit`)
     pub save_position: bool,
-    /// Window ID to embed into (not used with IPC currently, but kept for API compat)
+    /// X11 window ID to embed into (`--wid`). `None` = separate mpv window.
     pub wid: Option<i64>,
+    /// Run without any video/audio output (tests, CI)
+    pub headless: bool,
     /// Additional custom arguments
     pub extra_args: Vec<String>,
 }
@@ -43,83 +53,80 @@ pub struct PlayerConfig {
 impl Default for PlayerConfig {
     fn default() -> Self {
         Self {
+            mpv_path: "mpv".to_string(),
             hwdec: "auto".to_string(),
-            fullscreen: true,
+            fullscreen: false,
             osc: true,
             volume: 100,
-            save_position: true,
+            save_position: false,
             wid: None,
+            headless: false,
             extra_args: Vec::new(),
         }
     }
 }
 
-/// Shared state accessible by UI synchronously
-struct SharedState {
-    position: RwLock<f64>,
-    duration: RwLock<Option<f64>>,
-    paused: RwLock<bool>,
-    active: RwLock<bool>,
+/// Point-in-time view of the playback state, safe to read from any UI thread.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PlaybackSnapshot {
+    /// mpv process is running and connected
+    pub active: bool,
+    /// A file is loaded (not idle)
+    pub loaded: bool,
+    pub position: f64,
+    pub duration: Option<f64>,
+    pub paused: bool,
+    pub volume: f64,
+    pub muted: bool,
+    pub eof: bool,
+    pub title: Option<String>,
+    /// Last error reported by mpv or the actor (e.g. file failed to load)
+    pub last_error: Option<String>,
 }
 
 /// Messages sent to the background actor
 enum PlayerMessage {
-    PlayFile(String, Option<u64>), // path, start_time
-    PlayUrl(String),
-    Command(String, Vec<Value>),
+    Load { target: String, start: Option<f64> },
+    Command(Vec<Value>),
     SetConfig(PlayerConfig),
     Stop,
+    Shutdown,
 }
 
-/// Video player handle
+/// Player handle. Clone freely; all clones control the same mpv instance.
 #[derive(Clone)]
 pub struct Player {
     sender: mpsc::UnboundedSender<PlayerMessage>,
-    state: Arc<SharedState>,
-    // We store config locally too for get/modify, but send updates to actor
+    state: Arc<RwLock<PlaybackSnapshot>>,
     config: Arc<RwLock<PlayerConfig>>,
 }
 
-unsafe impl Send for Player {}
-unsafe impl Sync for Player {}
-
 impl Player {
-    /// Create a new player with the given configuration
+    /// Create a new player. Spawns a dedicated background thread; mpv itself is
+    /// only started on the first `play*` call.
     pub fn new(config: PlayerConfig) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
-        let state = Arc::new(SharedState {
-            position: RwLock::new(0.0),
-            duration: RwLock::new(None),
-            paused: RwLock::new(false),
-            active: RwLock::new(false),
-        });
-        
-        // Clone for listener
-        let state_clone = state.clone();
-        let config_clone = config.clone();
+        let state = Arc::new(RwLock::new(PlaybackSnapshot { volume: config.volume as f64, ..Default::default() }));
+        let actor_state = state.clone();
+        let actor_config = config.clone();
 
-        // Spawn background task
-        // We use tokio::spawn, so this must be called within a runtime context or one must exist.
-        // If compilation fails or runtime panic happens, we might need a dedicated thread, 
-        // but `iced` usually provides the runtime.
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                run_player_actor(receiver, state_clone, config_clone).await;
+        let spawned = std::thread::Builder::new()
+            .name("rmh-player".into())
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        error!("Failed to build player runtime: {e}");
+                        return;
+                    }
+                };
+                rt.block_on(run_player_actor(receiver, actor_state, actor_config));
             });
-        } else {
-            // Fallback: spawn a thread that builds a runtime? 
-            // Better to assume we are in a runtime for now.
-            // If try_current fails, we'll log it.
-            // Actually, we can use std::thread::spawn and create a basic runtime if needed,
-            // but let's assume valid environment.
-            error!("Could not find Tokio runtime. Player actor not spawned!");
+        if let Err(e) = spawned {
+            error!("Failed to spawn player thread: {e}");
         }
 
-        Self {
-            sender,
-            state,
-            config: Arc::new(RwLock::new(config)),
-        }
+        Self { sender, state, config: Arc::new(RwLock::new(config)) }
     }
 
     /// Create a player with default configuration
@@ -127,12 +134,20 @@ impl Player {
         Self::new(PlayerConfig::default())
     }
 
-    /// Get current configuration
-    pub fn get_config(&self) -> PlayerConfig {
-        self.config.read().unwrap().clone()
+    /// Check whether the configured mpv binary can be executed. Returns its version line.
+    pub fn mpv_version(mpv_path: &str) -> Option<String> {
+        let out = std::process::Command::new(mpv_path).arg("--version").output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&out.stdout).lines().next().map(|s| s.to_string())
     }
 
-    /// Update the player configuration
+    pub fn get_config(&self) -> PlayerConfig {
+        self.config.read().map(|c| c.clone()).unwrap_or_default()
+    }
+
+    /// Update configuration. A running mpv instance is restarted on next play.
     pub fn set_config(&mut self, config: PlayerConfig) {
         if let Ok(mut c) = self.config.write() {
             *c = config.clone();
@@ -140,316 +155,399 @@ impl Player {
         let _ = self.sender.send(PlayerMessage::SetConfig(config));
     }
 
-    /// Play a video file
+    /// Play a local file
     pub fn play(&mut self, file_path: &Path) -> Result<()> {
         self.play_at_position(file_path, None)
     }
 
-    /// Play a video file starting at specific position (seconds)
+    /// Play a local file starting at a position (seconds)
     pub fn play_at_position(&mut self, file_path: &Path, start_time: Option<u64>) -> Result<()> {
-        let path_str = file_path.to_str().context("Invalid path")?.to_string();
-        self.sender.send(PlayerMessage::PlayFile(path_str, start_time))
-            .map_err(|_| anyhow::anyhow!("Player actor dead"))
+        if !file_path.exists() {
+            anyhow::bail!("File not found: {}", file_path.display());
+        }
+        let path_str = file_path.to_str().context("Path is not valid UTF-8")?.to_string();
+        self.send(PlayerMessage::Load { target: path_str, start: start_time.filter(|t| *t > 0).map(|t| t as f64) })
     }
 
-    /// Play a URL
+    /// Play a URL (http stream, torrent stream server, ...)
     pub fn play_url(&mut self, url: &str) -> Result<()> {
-        self.sender.send(PlayerMessage::PlayUrl(url.to_string()))
-             .map_err(|_| anyhow::anyhow!("Player actor dead"))
+        self.send(PlayerMessage::Load { target: url.to_string(), start: None })
     }
-    
+
+    pub fn snapshot(&self) -> PlaybackSnapshot {
+        self.state.read().map(|s| s.clone()).unwrap_or_default()
+    }
+
     pub fn get_time_pos(&self) -> Option<f64> {
-         self.state.position.read().ok().map(|v| *v)
+        Some(self.snapshot().position)
     }
 
     pub fn get_duration(&self) -> Option<f64> {
-         self.state.duration.read().ok().and_then(|v| *v)
+        self.snapshot().duration
     }
 
     pub fn is_paused(&self) -> bool {
-         self.state.paused.read().ok().map(|v| *v).unwrap_or(false)
-    }
-
-    pub fn set_paused(&self, paused: bool) -> Result<()> {
-        let cmd = PlayerMessage::Command("set_property".to_string(), vec![Value::String("pause".to_string()), Value::Bool(paused)]);
-        self.sender.send(cmd).map_err(|_| anyhow::anyhow!("Player actor dead"))
-    }
-
-    pub fn seek(&self, position: f64) -> Result<()> {
-        let val = serde_json::Number::from_f64(position)
-            .ok_or_else(|| anyhow::anyhow!("Invalid seek position"))?;
-        let cmd = PlayerMessage::Command("set_property".to_string(), vec![Value::String("time-pos".to_string()), Value::Number(val)]);
-        self.sender.send(cmd).map_err(|_| anyhow::anyhow!("Player actor dead"))
+        self.snapshot().paused
     }
 
     pub fn is_active(&self) -> bool {
-         self.state.active.read().ok().map(|v| *v).unwrap_or(false)
+        self.snapshot().active
     }
 
-    /// Stop playback
+    pub fn set_paused(&self, paused: bool) -> Result<()> {
+        self.command(vec![json!("set_property"), json!("pause"), json!(paused)])
+    }
+
+    pub fn toggle_pause(&self) -> Result<()> {
+        self.command(vec![json!("cycle"), json!("pause")])
+    }
+
+    /// Seek to an absolute position in seconds
+    pub fn seek(&self, position: f64) -> Result<()> {
+        if !position.is_finite() {
+            anyhow::bail!("Invalid seek position");
+        }
+        self.command(vec![json!("seek"), json!(position.max(0.0)), json!("absolute")])
+    }
+
+    /// Seek relative to the current position (seconds, may be negative)
+    pub fn seek_relative(&self, offset: f64) -> Result<()> {
+        self.command(vec![json!("seek"), json!(offset), json!("relative")])
+    }
+
+    /// Set volume (0-130, mpv's default max)
+    pub fn set_volume(&self, volume: f64) -> Result<()> {
+        let v = volume.clamp(0.0, 130.0);
+        if let Ok(mut s) = self.state.write() {
+            s.volume = v;
+        }
+        if let Ok(mut c) = self.config.write() {
+            c.volume = v.min(100.0) as u8;
+        }
+        self.command(vec![json!("set_property"), json!("volume"), json!(v)])
+    }
+
+    pub fn set_muted(&self, muted: bool) -> Result<()> {
+        self.command(vec![json!("set_property"), json!("mute"), json!(muted)])
+    }
+
+    /// Stop playback and close the mpv window
     pub fn stop(&mut self) -> Result<()> {
-         self.sender.send(PlayerMessage::Stop).map_err(|_| anyhow::anyhow!("Player actor dead"))
+        self.send(PlayerMessage::Stop)
     }
 
-    // Dummy method for API compatibility
-    pub fn get_video_dimensions(&self) -> Option<(i64, i64)> {
-        None 
+    /// Raw mpv IPC command, e.g. `["cycle", "sub"]`
+    pub fn command(&self, args: Vec<Value>) -> Result<()> {
+        self.send(PlayerMessage::Command(args))
     }
-    
-    // Dummy method
+
+    // Kept for API compatibility with the old libmpv render path
+    pub fn get_video_dimensions(&self) -> Option<(i64, i64)> {
+        None
+    }
+
     pub fn render_to_buffer(&self, _buffer: &mut [u8], _width: i32, _height: i32, _stride: usize) -> Result<()> {
         Err(anyhow::anyhow!("Software rendering not supported in IPC mode"))
     }
+
+    fn send(&self, msg: PlayerMessage) -> Result<()> {
+        self.sender.send(msg).map_err(|_| anyhow::anyhow!("Player actor is not running"))
+    }
 }
 
-/// The Actor Loop
-async fn run_player_actor(
-    mut receiver: mpsc::UnboundedReceiver<PlayerMessage>,
-    state: Arc<SharedState>,
-    mut config: PlayerConfig
-) {
-    let mut mpv_process: Option<Child> = None;
-    let mut ipc_stream: Option<UnixStream> = None;
-    let mut ipc_reader: Option<BufReader<tokio::net::unix::OwnedReadHalf>> = None;
-    let mut ipc_writer: Option<tokio::net::unix::OwnedWriteHalf> = None;
-
-    let unique_id = Uuid::new_v4();
-    let socket_path = std::env::temp_dir().join(format!("rmh-mpv-{}.sock", unique_id));
-
-    // loop over messages (and ipc events if connected)
-    loop {
-        // Prepare futures
-        // We need to poll the receiver AND the ipc_reader (if active)
-        
-        let mut line_buffer = String::new();
-        
-        tokio::select! {
-            msg = receiver.recv() => {
-                match msg {
-                    Some(m) => {
-                        // Handle command
-                        match m {
-                            PlayerMessage::PlayFile(path, start) => {
-                                // Ensure Running
-                                if mpv_process.is_none() {
-                                    start_mpv(&mut mpv_process, &config, &socket_path).await;
-                                    connect_ipc(&mut ipc_stream, &mut ipc_reader, &mut ipc_writer, &socket_path, &state).await;
-                                }
-                                
-                                let mut args = vec![Value::String(path), Value::String("replace".to_string())];
-                                if let Some(t) = start {
-                                    args.push(Value::String(format!("start={}", t)));
-                                }
-                                send_ipc("loadfile", args, &mut ipc_writer).await;
-                            },
-                             PlayerMessage::PlayUrl(url) => {
-                                if mpv_process.is_none() {
-                                    start_mpv(&mut mpv_process, &config, &socket_path).await;
-                                    connect_ipc(&mut ipc_stream, &mut ipc_reader, &mut ipc_writer, &socket_path, &state).await;
-                                }
-                                send_ipc("loadfile", vec![Value::String(url), Value::String("replace".to_string())], &mut ipc_writer).await;
-                             },
-                             PlayerMessage::Command(cmd, args) => {
-                                 if mpv_process.is_some() {
-                                     send_ipc(&cmd, args, &mut ipc_writer).await;
-                                 }
-                             },
-                             PlayerMessage::SetConfig(new_config) => {
-                                 config = new_config;
-                                 ipc_writer = None;
-                                 ipc_reader = None;
-                                 ipc_stream = None;
-                                 if let Some(mut child) = mpv_process.take() {
-                                     let _ = child.kill().await;
-                                 }
-                                 if let Ok(mut w) = state.active.write() { *w = false; }
-                                 // Next play will restart with new config
-                             },
-                             PlayerMessage::Stop => {
-                                 if mpv_process.is_some() {
-                                     send_ipc("quit", vec![], &mut ipc_writer).await;
-                                     // wait for it to die?
-                                     // we rely on shutdown event or wait
-                                     // Reset
-                                     ipc_writer = None;
-                                     ipc_reader = None;
-                                     ipc_stream = None;
-                                     mpv_process = None; // Assume it quits
-                                     if let Ok(mut w) = state.active.write() { *w = false; }
-                                 }
-                             }
-                        }
-                    },
-                    None => break, // Channel closed
-                }
-            }
-            
-            // Read from IPC if connected
-            res = async {
-                 if let Some(reader) = ipc_reader.as_mut() {
-                     reader.read_line(&mut line_buffer).await
-                 } else {
-                     std::future::pending().await
-                 }
-            } => {
-                 match res {
-                     Ok(0) => {
-                         // EOF
-                         ipc_reader = None;
-                         ipc_writer = None;
-                         ipc_stream = None;
-                         mpv_process = None;
-                         if let Ok(mut w) = state.active.write() { *w = false; }
-                     },
-                     Ok(_) => {
-                         // Parse JSON
-                         if let Ok(val) = serde_json::from_str::<Value>(&line_buffer) {
-                             handle_ipc_event(&val, &state);
-                         }
-                         line_buffer.clear();
-                     },
-                     Err(_) => {
-                         // Error
-                         ipc_reader = None;
-                     }
-                 }
-            }
+impl Drop for Player {
+    fn drop(&mut self) {
+        // Last handle gone (the actor holds no Player): shut mpv down.
+        if Arc::strong_count(&self.state) <= 2 {
+            let _ = self.sender.send(PlayerMessage::Shutdown);
         }
     }
-    
-    // Cleanup
-    if socket_path.exists() {
-        let _ = std::fs::remove_file(socket_path);
-    }
 }
 
-async fn start_mpv(process: &mut Option<Child>, config: &PlayerConfig, socket_path: &Path) {
-    // cleanup old socket
-    if socket_path.exists() {
-        let _ = std::fs::remove_file(socket_path);
-    }
+/// A live mpv process + IPC connection
+struct MpvSession {
+    child: Child,
+    lines: Lines<BufReader<OwnedReadHalf>>,
+    writer: OwnedWriteHalf,
+    socket_path: PathBuf,
+}
 
-    let mut args = vec![
-            format!("--input-ipc-server={}", socket_path.to_string_lossy()),
-            "--idle=yes".to_string(), 
+impl MpvSession {
+    async fn start(config: &PlayerConfig) -> Result<Self> {
+        let socket_path = std::env::temp_dir().join(format!("rmh-mpv-{}.sock", Uuid::new_v4()));
+        let _ = std::fs::remove_file(&socket_path);
+
+        let mut args = vec![
+            format!("--input-ipc-server={}", socket_path.display()),
+            "--idle=yes".to_string(),
             format!("--hwdec={}", config.hwdec),
             format!("--volume={}", config.volume),
             format!("--osc={}", if config.osc { "yes" } else { "no" }),
             "--keep-open=yes".to_string(),
-            format!("--force-window=yes"),
-    ];
-    
-    if let Some(wid) = config.wid {
-        args.push(format!("--wid={}", wid));
-        // When embedding, we might want to disable OSC if we draw our own, 
-        // but for now keep it or let user config decide.
-        // We also want to bind 'q', 'ESC', 'BACKSPACE' to quit
-        args.push("--input-conf=/dev/null".to_string()); // reset bindings
-        args.push("--input-commands=q quit;ESC quit;BS quit".to_string());
-    }
+            "--input-default-bindings=yes".to_string(),
+            "--title=RustMediaHub Player - ${media-title}".to_string(),
+            "--no-terminal".to_string(),
+        ];
+        if config.headless {
+            args.push("--vo=null".into());
+            args.push("--ao=null".into());
+        } else {
+            args.push("--force-window=yes".into());
+        }
+        if config.save_position {
+            args.push("--save-position-on-quit".into());
+        }
+        if let Some(wid) = config.wid {
+            args.push(format!("--wid={wid}"));
+        }
+        if config.fullscreen {
+            args.push("--fs".into());
+        }
+        args.extend(config.extra_args.iter().cloned());
 
-    if config.fullscreen {
-        // If embedded, fullscreen applies to the embedded viewport, which is what we want.
-        // But if floating, it makes the window FS.
-        // If embedding, usually we resize the player to fill the area.
-        args.push("--fs".to_string());
-    }
-    args.extend(config.extra_args.clone());
-
-    info!("Starting MPV: {:?}", args);
-    match Command::new("mpv")
+        info!("Starting mpv: {} {:?}", config.mpv_path, args);
+        let mut child = Command::new(&config.mpv_path)
             .args(&args)
             .stdin(Stdio::null())
-            .stdout(Stdio::null()) 
-            .stderr(Stdio::piped()) 
-            .spawn() {
-        Ok(mut child) => {
-            if let Some(stderr) = child.stderr.take() {
-                tokio::spawn(async move {
-                     let reader = BufReader::new(stderr);
-                     let mut lines = reader.lines();
-                     while let Ok(Some(line)) = lines.next_line().await {
-                         info!("MPV: {}", line);
-                     }
-                });
-            }
-            *process = Some(child);
-        },
-        Err(e) => {
-            error!("Failed to spawn mpv: {}", e);
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .with_context(|| format!("Failed to start '{}'. Is mpv installed (sudo apt install mpv)?", config.mpv_path))?;
+
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    debug!("mpv: {}", line);
+                }
+            });
         }
+
+        // Wait for the IPC socket (up to ~5s)
+        let mut stream = None;
+        for _ in 0..100 {
+            if let Ok(Some(status)) = child.try_wait() {
+                anyhow::bail!("mpv exited immediately ({status})");
+            }
+            if let Ok(s) = UnixStream::connect(&socket_path).await {
+                stream = Some(s);
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+        let stream = stream.context("Timed out connecting to mpv IPC socket")?;
+        let (r, w) = stream.into_split();
+        let mut session = Self { child, lines: BufReader::new(r).lines(), writer: w, socket_path };
+
+        for (id, prop) in [
+            "time-pos", "duration", "pause", "volume", "mute", "eof-reached", "idle-active", "media-title",
+        ]
+        .iter()
+        .enumerate()
+        {
+            session.send(vec![json!("observe_property"), json!(id + 1), json!(prop)]).await?;
+        }
+        Ok(session)
+    }
+
+    async fn send(&mut self, command: Vec<Value>) -> Result<()> {
+        let mut line = json!({ "command": command }).to_string();
+        line.push('\n');
+        self.writer.write_all(line.as_bytes()).await.context("mpv IPC write failed")
+    }
+
+    async fn send_named(&mut self, command: Value) -> Result<()> {
+        let mut line = json!({ "command": command }).to_string();
+        line.push('\n');
+        self.writer.write_all(line.as_bytes()).await.context("mpv IPC write failed")
+    }
+
+    async fn shutdown(mut self) {
+        let _ = self.send(vec![json!("quit")]).await;
+        if timeout(Duration::from_secs(2), self.child.wait()).await.is_err() {
+            let _ = self.child.kill().await;
+        }
+        let _ = std::fs::remove_file(&self.socket_path);
     }
 }
 
-async fn connect_ipc(
-    stream_store: &mut Option<UnixStream>,
-    reader_store: &mut Option<BufReader<tokio::net::unix::OwnedReadHalf>>,
-    writer_store: &mut Option<tokio::net::unix::OwnedWriteHalf>,
-    socket_path: &Path,
-    state: &Arc<SharedState>
+async fn run_player_actor(
+    mut receiver: mpsc::UnboundedReceiver<PlayerMessage>,
+    state: Arc<RwLock<PlaybackSnapshot>>,
+    mut config: PlayerConfig,
 ) {
-    // Retry loop
-    for _ in 0..50 {
-        if socket_path.exists() {
-            if let Ok(stream) = UnixStream::connect(socket_path).await {
-                let (r, w) = stream.into_split();
-                *stream_store = None; // We split it, so we don't keep the original stream in this field if we use owned halves
-                                      // Actually we don't need stream_store if we have r/w
-                *reader_store = Some(BufReader::new(r));
-                *writer_store = Some(w);
-                
-                if let Ok(mut w) = state.active.write() { *w = true; }
-                
-                // Init observations
-                send_ipc("observe_property", vec![Value::Number(1.into()), Value::String("time-pos".into())], writer_store).await;
-                send_ipc("observe_property", vec![Value::Number(2.into()), Value::String("duration".into())], writer_store).await;
-                send_ipc("observe_property", vec![Value::Number(3.into()), Value::String("pause".into())], writer_store).await;
-                return;
+    let mut session: Option<MpvSession> = None;
+
+    let set_inactive = |state: &Arc<RwLock<PlaybackSnapshot>>| {
+        if let Ok(mut s) = state.write() {
+            let volume = s.volume;
+            let last_error = s.last_error.take();
+            *s = PlaybackSnapshot { volume, last_error, ..Default::default() };
+        }
+    };
+
+    loop {
+        tokio::select! {
+            msg = receiver.recv() => {
+                let Some(msg) = msg else { break };
+                match msg {
+                    PlayerMessage::Load { target, start } => {
+                        if session.is_none() {
+                            match MpvSession::start(&config).await {
+                                Ok(s) => {
+                                    session = Some(s);
+                                    if let Ok(mut st) = state.write() { st.active = true; st.last_error = None; }
+                                }
+                                Err(e) => {
+                                    error!("{e:#}");
+                                    if let Ok(mut st) = state.write() { st.last_error = Some(format!("{e:#}")); }
+                                    continue;
+                                }
+                            }
+                        }
+                        if let Ok(mut st) = state.write() {
+                            st.position = 0.0;
+                            st.duration = None;
+                            st.eof = false;
+                            st.loaded = true;
+                            st.last_error = None;
+                        }
+                        let s = session.as_mut().unwrap();
+                        // Named arguments: works across mpv versions (0.38 added an
+                        // `index` positional arg to loadfile that broke positional options).
+                        let mut cmd = json!({ "name": "loadfile", "url": target, "flags": "replace" });
+                        if let Some(t) = start {
+                            cmd["options"] = json!({ "start": format!("{t}") });
+                        }
+                        if let Err(e) = s.send_named(cmd).await {
+                            warn!("{e:#}");
+                        }
+                        // Make sure we are not stuck paused from a previous file
+                        let _ = s.send(vec![json!("set_property"), json!("pause"), json!(false)]).await;
+                    }
+                    PlayerMessage::Command(args) => {
+                        if let Some(s) = session.as_mut() {
+                            if let Err(e) = s.send(args).await { warn!("{e:#}"); }
+                        }
+                    }
+                    PlayerMessage::SetConfig(new_config) => {
+                        let restart = session.is_some()
+                            && (new_config.wid != config.wid || new_config.mpv_path != config.mpv_path
+                                || new_config.headless != config.headless);
+                        config = new_config;
+                        if restart {
+                            if let Some(s) = session.take() { s.shutdown().await; }
+                            set_inactive(&state);
+                        }
+                    }
+                    PlayerMessage::Stop => {
+                        if let Some(s) = session.take() { s.shutdown().await; }
+                        set_inactive(&state);
+                    }
+                    PlayerMessage::Shutdown => break,
+                }
+            }
+
+            // `next_line` is cancel-safe, so partial lines survive select! cancellation.
+            line = async {
+                match session.as_mut() {
+                    Some(s) => s.lines.next_line().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match line {
+                    Ok(Some(line)) => {
+                        if let Ok(val) = serde_json::from_str::<Value>(&line) {
+                            handle_ipc_event(&val, &state);
+                        }
+                    }
+                    Ok(None) | Err(_) => {
+                        info!("mpv closed");
+                        if let Some(mut s) = session.take() {
+                            let _ = timeout(Duration::from_secs(1), s.child.wait()).await;
+                            let _ = std::fs::remove_file(&s.socket_path);
+                        }
+                        set_inactive(&state);
+                    }
+                }
             }
         }
-        sleep(Duration::from_millis(100)).await;
     }
-    error!("Failed to connect to MPV IPC");
-}
 
-async fn send_ipc(command: &str, args: Vec<Value>, writer: &mut Option<tokio::net::unix::OwnedWriteHalf>) {
-    if let Some(w) = writer {
-        let mut cmd_vec = vec![Value::String(command.to_string())];
-        cmd_vec.extend(args);
-        let json_cmd = serde_json::json!({ "command": cmd_vec });
-        let mut str_cmd = json_cmd.to_string();
-        str_cmd.push('\n');
-        let _ = w.write_all(str_cmd.as_bytes()).await;
+    if let Some(s) = session.take() {
+        s.shutdown().await;
     }
 }
 
-fn handle_ipc_event(val: &Value, state: &Arc<SharedState>) {
-    // Parse "event": "property-change"
-    if let Some(event) = val.get("event").and_then(|v| v.as_str()) {
-        if event == "property-change" {
-             if let Some(name) = val.get("name").and_then(|v| v.as_str()) {
-                 match name {
-                     "time-pos" => {
-                         if let Some(pos) = val.get("data").and_then(|v| v.as_f64()) {
-                             if let Ok(mut w) = state.position.write() { *w = pos; }
-                         }
-                     },
-                     "duration" => {
-                         if let Some(dur) = val.get("data").and_then(|v| v.as_f64()) {
-                             if let Ok(mut w) = state.duration.write() { *w = Some(dur); }
-                         }
-                     },
-                     "pause" => {
-                         if let Some(p) = val.get("data").and_then(|v| v.as_bool()) {
-                             if let Ok(mut w) = state.paused.write() { *w = p; }
-                         }
-                     },
-                     _ => {}
-                 }
-             }
-        } else if event == "shutdown" {
-             if let Ok(mut w) = state.active.write() { *w = false; }
+fn handle_ipc_event(val: &Value, state: &Arc<RwLock<PlaybackSnapshot>>) {
+    let Some(event) = val.get("event").and_then(|v| v.as_str()) else {
+        if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
+            if err != "success" {
+                debug!("mpv command error: {err}");
+            }
         }
+        return;
+    };
+    let Ok(mut s) = state.write() else { return };
+    match event {
+        "property-change" => {
+            let data = val.get("data");
+            match val.get("name").and_then(|v| v.as_str()).unwrap_or("") {
+                "time-pos" => s.position = data.and_then(|v| v.as_f64()).unwrap_or(s.position),
+                "duration" => s.duration = data.and_then(|v| v.as_f64()),
+                "pause" => s.paused = data.and_then(|v| v.as_bool()).unwrap_or(false),
+                "volume" => s.volume = data.and_then(|v| v.as_f64()).unwrap_or(s.volume),
+                "mute" => s.muted = data.and_then(|v| v.as_bool()).unwrap_or(false),
+                "eof-reached" => s.eof = data.and_then(|v| v.as_bool()).unwrap_or(false),
+                "idle-active" => {
+                    if data.and_then(|v| v.as_bool()).unwrap_or(false) {
+                        s.loaded = false;
+                    }
+                }
+                "media-title" => s.title = data.and_then(|v| v.as_str()).map(|t| t.to_string()),
+                _ => {}
+            }
+        }
+        "file-loaded" => {
+            s.loaded = true;
+            s.last_error = None;
+        }
+        "end-file" => {
+            if val.get("reason").and_then(|v| v.as_str()) == Some("error") {
+                let msg = val.get("file_error").and_then(|v| v.as_str()).unwrap_or("unknown error");
+                s.last_error = Some(format!("mpv could not play file: {msg}"));
+                s.loaded = false;
+            }
+        }
+        "shutdown" => s.active = false,
+        _ => {}
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_property_changes() {
+        let state = Arc::new(RwLock::new(PlaybackSnapshot::default()));
+        handle_ipc_event(&json!({"event":"property-change","name":"time-pos","data":12.5}), &state);
+        handle_ipc_event(&json!({"event":"property-change","name":"duration","data":60.0}), &state);
+        handle_ipc_event(&json!({"event":"property-change","name":"pause","data":true}), &state);
+        handle_ipc_event(&json!({"event":"property-change","name":"volume","data":42.0}), &state);
+        handle_ipc_event(&json!({"event":"end-file","reason":"error","file_error":"unrecognized file format"}), &state);
+        let s = state.read().unwrap().clone();
+        assert_eq!(s.position, 12.5);
+        assert_eq!(s.duration, Some(60.0));
+        assert!(s.paused);
+        assert_eq!(s.volume, 42.0);
+        assert!(s.last_error.unwrap().contains("unrecognized"));
+    }
+
+    #[test]
+    fn missing_file_is_rejected() {
+        let mut p = Player::with_defaults();
+        assert!(p.play(Path::new("/definitely/not/here.mkv")).is_err());
+    }
+}
