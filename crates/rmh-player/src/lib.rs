@@ -140,7 +140,9 @@ impl Player {
         if !out.status.success() {
             return None;
         }
-        String::from_utf8_lossy(&out.stdout).lines().next().map(|s| s.to_string())
+        // "mpv 0.37.0 Copyright ..." -> "mpv 0.37.0"
+        let first = String::from_utf8_lossy(&out.stdout).lines().next()?.to_string();
+        Some(first.split_whitespace().take(2).collect::<Vec<_>>().join(" "))
     }
 
     pub fn get_config(&self) -> PlayerConfig {

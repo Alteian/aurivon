@@ -7,7 +7,7 @@ use iced::widget::{button, column, container, horizontal_space, row, text, text_
 use iced::{Element, Length, Task};
 use rmh_core::{Library, MediaItem, MediaType};
 use rmh_database::{Database, MediaRepository};
-use rmh_metadata::{TmdbClient, MovieSearchResult, PosterSize};
+use rmh_metadata::{TmdbClient, MovieSearchResult};
 use rmh_player::{Player, PlayerConfig};
 use rmh_scanner::Scanner;
 use rmh_scraper::{ScraperAddon, ScraperAddonConfig, ScrapedResult, SearchQuery};
@@ -62,12 +62,30 @@ pub struct RustMediaHub {
     active_stream: Option<TorrentStream>,
     /// Settings view state
     settings_view: crate::views::SettingsView,
-    /// Frame buffer for software rendering (Wayland fallback)
-    video_frame: Option<iced::widget::image::Handle>,
-    /// Player state
+    /// What is currently playing (drives the now-playing bar)
+    now_playing: Option<NowPlaying>,
+    /// Player state mirrored from `Player::snapshot()` on every tick
     player_position: f64,
     player_duration: Option<f64>,
     is_paused: bool,
+    volume: f64,
+    /// Path typed into the "add library" input
+    library_path_input: String,
+    /// mpv version line, or None if mpv is not runnable
+    mpv_version: Option<String>,
+}
+
+/// Currently playing item
+#[derive(Debug, Clone)]
+pub struct NowPlaying {
+    pub title: String,
+    /// Library item being played (None for streams)
+    pub media_id: Option<Uuid>,
+    pub started_at: std::time::Instant,
+    /// Has mpv reported itself active for this item yet?
+    pub seen_active: bool,
+    /// Last position persisted to the database
+    pub last_saved: f64,
 }
 
 
@@ -105,10 +123,13 @@ pub enum Message {
     PlayMedia(Uuid),
     PlayStreamUrl(String),
     PlaybackStarted(Result<(), String>),
-    Tick, // Frame update loop
+    Tick, // Poll player state
     TogglePause,
     Seek(f64),
+    SeekRelative(f64),
+    SetVolume(f64),
     StopPlayback,
+    ProgressSaved(Result<(), String>),
     
     // Settings
     UpdateTmdbApiKey(String),
@@ -123,6 +144,8 @@ pub enum Message {
     // Folder picker
     PickFolder,
     FolderPicked(Option<PathBuf>),
+    LibraryPathChanged(String),
+    AddLibraryFromInput,
     
     // Discover/Search - Title search (TMDB)
     DiscoverQueryChanged(String),
@@ -192,7 +215,7 @@ impl RustMediaHub {
             libraries: Vec::new(),
             media_items: Vec::new(),
             selected_item: None,
-            player: Player::with_defaults(),
+            player: Player::new(PlayerConfig::default()),
             is_loading: true,
             status_message: "Initializing...".to_string(),
             error_message: None,
@@ -201,10 +224,13 @@ impl RustMediaHub {
             movie_search_results: Vec::new(),
             selected_movie: None,
             window_id: None,
-            video_frame: None,
+            now_playing: None,
             player_position: 0.0,
             player_duration: None,
             is_paused: false,
+            volume: 100.0,
+            library_path_input: String::new(),
+            mpv_version: Player::mpv_version("mpv"),
             discover_results: Vec::new(),
             is_searching: false,
             scraper,
@@ -249,9 +275,55 @@ impl RustMediaHub {
         "RustMediaHub".to_string()
     }
 
+    /// Mark something as playing so the now-playing bar and polling start
+    fn begin_now_playing(&mut self, title: String, media_id: Option<Uuid>) {
+        self.now_playing = Some(NowPlaying {
+            title,
+            media_id,
+            started_at: std::time::Instant::now(),
+            seen_active: false,
+            last_saved: 0.0,
+        });
+        self.player_position = 0.0;
+        self.player_duration = None;
+        self.is_paused = false;
+    }
+
+    /// Persist watch progress for the current library item (if any)
+    fn save_progress_task(&mut self, finished: bool) -> Task<Message> {
+        let Some(np) = self.now_playing.as_mut() else { return Task::none() };
+        let Some(id) = np.media_id else { return Task::none() };
+        let pos = self.player_position;
+        np.last_saved = pos;
+        let watched = finished
+            || self.player_duration.map_or(false, |d| d > 0.0 && pos / d > 0.9);
+        // Remember locally so replaying resumes without a DB reload
+        if let Some(item) = self.media_items.iter_mut().find(|m| m.id == id) {
+            item.watch_progress = if watched { 0 } else { pos as i64 };
+            item.watched |= watched;
+        }
+        Task::perform(
+            async move {
+                let db_path = Database::default_path().map_err(|e| e.to_string())?;
+                let db = Database::new(&db_path).await.map_err(|e| e.to_string())?;
+                let repo = MediaRepository::new(db.pool());
+                let progress = if watched { 0 } else { pos as i64 };
+                repo.update_watch_progress(id, progress).await.map_err(|e| e.to_string())?;
+                if watched {
+                    repo.update_watched_status(id, true).await.map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            },
+            Message::ProgressSaved,
+        )
+    }
+
     /// Try to find and attach the window ID if not already set
     fn ensure_window_id(&mut self) {
-        if self.window_id.is_none() {
+        // Embedding mpv (--wid) into the iced window paints over the whole UI,
+        // including the playback controls, so it is opt-in only.
+        let embed = std::env::var("RMH_EMBED_PLAYER").map(|v| v == "1").unwrap_or(false);
+        if embed && self.window_id.is_none() {
              #[cfg(target_os = "linux")]
              // We search for the window by title. This requires the window to be mapped.
              // On macOS/Windows, this might require different implementation.
@@ -295,12 +367,15 @@ impl RustMediaHub {
                     Ok(stream) => {
                         self.status_message = format!("Playing: {}", stream.info.filename);
                         let url = stream.info.stream_url.clone();
+                        let title = stream.info.filename.clone();
                         self.active_stream = Some(stream);
                         // Stop spinner if it was running
                         self.is_loading = false;
                         
                         if let Err(e) = self.player.play_url(&url) {
                             self.error_message = Some(format!("Playback error: {}", e));
+                        } else {
+                            self.begin_now_playing(title, None);
                         }
                     }
                     Err(e) => {
@@ -422,10 +497,12 @@ impl RustMediaHub {
             Message::MediaLoaded(result) => {
                 match result {
                     Ok(items) => {
+                        self.is_loading = false;
                         self.media_items = items;
                         self.status_message = format!("{} media items", self.media_items.len());
                     }
                     Err(e) => {
+                        self.is_loading = false;
                         self.error_message = Some(e);
                     }
                 }
@@ -433,6 +510,17 @@ impl RustMediaHub {
             }
 
             Message::AddLibrary(name, path) => {
+                let path_buf = PathBuf::from(&path);
+                if !path_buf.is_dir() {
+                    self.error_message = Some(format!("Not a folder: {}", path));
+                    return Task::none();
+                }
+                if self.libraries.iter().any(|l| l.path == path) {
+                    self.error_message = Some(format!("Library already added: {}", path));
+                    return Task::none();
+                }
+                self.is_loading = true;
+                self.status_message = format!("Adding {}...", path);
                 let library = Library::new(name, path.clone(), MediaType::Movie);
                 let library_clone = library.clone();
                 
@@ -451,6 +539,28 @@ impl RustMediaHub {
                     },
                     Message::LibraryAdded,
                 )
+            }
+
+            Message::LibraryPathChanged(path) => {
+                self.library_path_input = path;
+                Task::none()
+            }
+
+            Message::AddLibraryFromInput => {
+                let raw = self.library_path_input.trim().to_string();
+                if raw.is_empty() {
+                    return Task::none();
+                }
+                // Expand ~
+                let path = if let Some(rest) = raw.strip_prefix("~") {
+                    dirs::home_dir()
+                        .map(|h| format!("{}{}", h.display(), rest))
+                        .unwrap_or(raw.clone())
+                } else {
+                    raw.clone()
+                };
+                self.library_path_input.clear();
+                self.update(Message::FolderPicked(Some(PathBuf::from(path))))
             }
 
             Message::LibraryAdded(result) => {
@@ -481,6 +591,7 @@ impl RustMediaHub {
                         )
                     }
                     Err(e) => {
+                        self.is_loading = false;
                         self.error_message = Some(e);
                         Task::none()
                     }
@@ -509,8 +620,9 @@ impl RustMediaHub {
                 match result {
                     Ok(id) => {
                         self.libraries.retain(|l| l.id != id);
-                        self.media_items.retain(|_| true); // TODO: filter by library
                         self.status_message = "Library removed".to_string();
+                        // Media rows are removed by ON DELETE CASCADE; reload them
+                        return self.update(Message::RefreshLibrary);
                     }
                     Err(e) => {
                         self.error_message = Some(e);
@@ -584,20 +696,27 @@ impl RustMediaHub {
 
             Message::PlayMedia(id) => {
                 self.ensure_window_id();
+                // Save progress of whatever was playing before switching
+                let save = self.save_progress_task(false);
                 if let Some(item) = self.media_items.iter().find(|m| m.id == id) {
                     let path = PathBuf::from(&item.file_path);
-                    let progress = item.watch_progress;
-                    
-                    match self.player.play_at_position(&path, Some(progress.max(0) as u64)) {
+                    let title = item.title.clone();
+                    // Resume if we have progress
+                    let start = (item.watch_progress > 5).then_some(item.watch_progress as u64);
+
+                    match self.player.play_at_position(&path, start) {
                         Ok(()) => {
-                            self.status_message = format!("Playing: {}", item.title);
+                            self.status_message = format!("Playing: {}", title);
+                            self.error_message = None;
+                            self.selected_item = Some(id);
+                            self.begin_now_playing(title, Some(id));
                         }
                         Err(e) => {
                             self.error_message = Some(format!("Playback error: {}", e));
                         }
                     }
                 }
-                Task::none()
+                save
             }
 
             Message::PlaybackStarted(result) => {
@@ -613,23 +732,51 @@ impl RustMediaHub {
             }
 
             Message::Tick => {
-                // If MPV is running (no window ID means separate window or SW), update state
-                if self.window_id.is_none() {
-                   
-                   // Update playback state
-                   if let Some(pos) = self.player.get_time_pos() {
-                       self.player_position = pos;
-                   }
-                   if let Some(dur) = self.player.get_duration() {
-                       self.player_duration = Some(dur);
-                   }
-                   self.is_paused = self.player.is_paused();
+                let snap = self.player.snapshot();
+                let Some(np) = self.now_playing.as_mut() else { return Task::none() };
+                if snap.active {
+                    np.seen_active = true;
+                }
+                let (seen_active, started_at, last_saved, title) =
+                    (np.seen_active, np.started_at, np.last_saved, np.title.clone());
+
+                if let Some(err) = snap.last_error.clone() {
+                    self.error_message = Some(err);
+                    self.status_message = "Playback failed".to_string();
+                    self.now_playing = None;
+                    let _ = self.player.stop();
+                    return Task::none();
+                }
+
+                if snap.active {
+                    self.player_position = snap.position;
+                    self.player_duration = snap.duration;
+                    self.is_paused = snap.paused;
+                    self.volume = snap.volume;
+                    if snap.eof {
+                        self.status_message = format!("Finished: {}", title);
+                    }
+                    // Persist progress every 30s of playback
+                    if (self.player_position - last_saved).abs() >= 30.0 {
+                        return self.save_progress_task(false);
+                    }
+                    return Task::none();
+                }
+
+                // Not active: either mpv is still starting, or the user closed its window
+                if seen_active || started_at.elapsed() > std::time::Duration::from_secs(10) {
+                    let finished = snap.eof
+                        || self.player_duration.map_or(false, |d| d - self.player_position < 5.0);
+                    let task = self.save_progress_task(finished);
+                    self.now_playing = None;
+                    self.status_message = format!("Stopped: {}", title);
+                    return task;
                 }
                 Task::none()
             }
 
             Message::TogglePause => {
-                let _ = self.player.set_paused(!self.is_paused);
+                let _ = self.player.toggle_pause();
                 self.is_paused = !self.is_paused; // Optimistic update
                 Task::none()
             }
@@ -640,15 +787,30 @@ impl RustMediaHub {
                 Task::none()
             }
 
+            Message::SeekRelative(offset) => {
+                let _ = self.player.seek_relative(offset);
+                Task::none()
+            }
+
+            Message::SetVolume(v) => {
+                self.volume = v;
+                let _ = self.player.set_volume(v);
+                Task::none()
+            }
+
             Message::StopPlayback => {
+                let task = self.save_progress_task(false);
                 let _ = self.player.stop();
-                self.video_frame = None;
-                // self.active_stream = None; // User wants to keep cache? Maybe keep stream alive in background?
-                // If we drop active_stream, the HTTP server and download stop.
-                // Keeping it around allows resuming later or other players to connect.
-                // But generally stopping playback means "done watching".
-                // If user wants to just go back, maybe we should keep it.
-                // For now, let's keep active_stream but clear video_frame to return to UI.
+                if let Some(np) = self.now_playing.take() {
+                    self.status_message = format!("Stopped: {}", np.title);
+                }
+                task
+            }
+
+            Message::ProgressSaved(result) => {
+                if let Err(e) = result {
+                    tracing::warn!("Failed to save watch progress: {}", e);
+                }
                 Task::none()
             }
 
@@ -663,9 +825,16 @@ impl RustMediaHub {
             }
 
             Message::PickFolder => {
-                // For now, we'll use a simple approach
-                // In production, use rfd crate for native file dialogs
-                Task::none()
+                Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .set_title("Choose a media folder")
+                            .pick_folder()
+                            .await
+                            .map(|h| h.path().to_path_buf())
+                    },
+                    Message::FolderPicked,
+                )
             }
 
             Message::FolderPicked(path) => {
@@ -932,8 +1101,11 @@ impl RustMediaHub {
                     
                     // If it's a direct URL, play it
                     if url.starts_with("http") {
+                        let title = result.title.clone();
                         if let Err(e) = self.player.play_url(&url) {
                             self.error_message = Some(format!("Playback error: {}", e));
+                        } else {
+                            self.begin_now_playing(title, None);
                         }
                         Task::none()
                     } else if url.starts_with("magnet:") {
@@ -964,6 +1136,7 @@ impl RustMediaHub {
                     self.error_message = Some(format!("Playback error: {}", e));
                 } else {
                     self.status_message = "Playing stream...".to_string();
+                    self.begin_now_playing(url.clone(), None);
                 }
                 Task::none()
             }
@@ -972,90 +1145,31 @@ impl RustMediaHub {
 
     /// Application subscription
     pub fn subscription(&self) -> iced::Subscription<Message> {
-        let mut subs = Vec::new();
-        
-        // Only tick if player is active and we are in software rendering mode (no window ID)
-        if self.window_id.is_none() && self.player.is_active() {
-            subs.push(iced::time::every(std::time::Duration::from_millis(16)).map(|_| Message::Tick));
+        if self.now_playing.is_none() {
+            return iced::Subscription::none();
         }
-
-        // Add keyboard listener if player is active (video_frame is Some)
-        if self.video_frame.is_some() {
-             subs.push(
-                 iced::event::listen_with(|event, _status, _window| {
-                    if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event {
-                        match key {
-                           iced::keyboard::Key::Named(iced::keyboard::key::Named::Backspace) => Some(Message::StopPlayback),
-                           iced::keyboard::Key::Named(iced::keyboard::key::Named::Space) => Some(Message::TogglePause),
-                           iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) => Some(Message::StopPlayback),
-                           _ => None,
-                        }
-                    } else {
-                        None
-                    }
-                 })
-             );
-        }
-
-        iced::Subscription::batch(subs)
+        let tick = iced::time::every(std::time::Duration::from_millis(250)).map(|_| Message::Tick);
+        // Global shortcuts while something plays (ignored when a text input has focus)
+        let keys = iced::event::listen_with(|event, status, _window| {
+            if status == iced::event::Status::Captured {
+                return None;
+            }
+            use iced::keyboard::{key::Named, Event, Key};
+            match event {
+                iced::Event::Keyboard(Event::KeyPressed { key: Key::Named(named), .. }) => match named {
+                    Named::Space => Some(Message::TogglePause),
+                    Named::ArrowLeft => Some(Message::SeekRelative(-10.0)),
+                    Named::ArrowRight => Some(Message::SeekRelative(10.0)),
+                    _ => None,
+                },
+                _ => None,
+            }
+        });
+        iced::Subscription::batch(vec![tick, keys])
     }
 
     /// Render the application view
     pub fn view(&self) -> Element<'_, Message> {
-        // If we have a video frame (software rendering), show it with controls
-        if let Some(handle) = &self.video_frame {
-             let image_widget = iced::widget::image(handle.clone())
-                     .width(Length::Fill)
-                     .height(Length::Fill)
-                     .content_fit(iced::ContentFit::Contain);
-            
-             // Controls
-             let play_pause_icon = if self.is_paused { "▶" } else { "⏸" };
-             let play_btn = button(text(play_pause_icon).size(20))
-                .on_press(Message::TogglePause)
-                .padding(10);
-                
-             let stop_btn = button(text("⏹").size(20))
-                .on_press(Message::StopPlayback)
-                .padding(10);
-             
-             let current_time_str = format_duration(self.player_position);
-             let total_time_str = self.player_duration.map(format_duration).unwrap_or_else(|| "--:--".to_string());
-             
-             let time_label = text(format!("{} / {}", current_time_str, total_time_str)).style(text::secondary);
-             
-             let slider = if let Some(duration) = self.player_duration {
-                 iced::widget::slider(0.0..=duration, self.player_position, Message::Seek)
-                     .step(1.0)
-                     .width(Length::Fill)
-             } else {
-                 iced::widget::slider(0.0..=100.0, 0.0, |_| Message::Tick).width(Length::Fill) // Dummy slider
-             };
-
-             let controls = container(
-                 row![
-                    play_btn,
-                    stop_btn,
-                    time_label,
-                    slider
-                 ]
-                 .spacing(10)
-                 .align_y(iced::Alignment::Center)
-                 .padding(10)
-             )
-             .style(container::dark)
-             .width(Length::Fill);
-
-             // Vertical layout: Image takes remaining space, controls at bottom
-             return column![
-                 container(image_widget).width(Length::Fill).height(Length::Fill).style(container::dark),
-                 controls
-             ]
-             .width(Length::Fill)
-             .height(Length::Fill)
-             .into();
-        }
-
         let content: Element<Message> = match self.current_view {
             View::Library => self.view_library(),
             View::Discover => self.view_discover(),
@@ -1066,14 +1180,17 @@ impl RustMediaHub {
         let nav_bar = self.view_nav_bar();
         let status_bar = self.view_status_bar();
 
-        let main_content = column![
+        let mut main_content = column![
             nav_bar,
             container(content)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .padding(20),
-            status_bar,
         ];
+        if self.now_playing.is_some() {
+            main_content = main_content.push(self.view_now_playing());
+        }
+        let main_content = main_content.push(status_bar);
 
         container(main_content)
             .width(Length::Fill)
@@ -1122,6 +1239,75 @@ impl RustMediaHub {
         )
         .width(Length::Fill)
         .style(container::dark)
+        .into()
+    }
+
+    /// Playback controls shown while something is playing (video renders in mpv's window)
+    fn view_now_playing(&self) -> Element<'_, Message> {
+        let Some(np) = &self.now_playing else { return horizontal_space().into() };
+
+        let play_pause = button(text(if self.is_paused { "▶ Play" } else { "⏸ Pause" }))
+            .on_press(Message::TogglePause)
+            .padding(8);
+        let back = button(text("⏪ 10s")).on_press(Message::SeekRelative(-10.0)).padding(8);
+        let fwd = button(text("10s ⏩")).on_press(Message::SeekRelative(10.0)).padding(8);
+        let stop = button(text("⏹ Stop")).on_press(Message::StopPlayback).padding(8);
+
+        let time_label = text(format!(
+            "{} / {}",
+            format_duration(self.player_position),
+            self.player_duration.map(format_duration).unwrap_or_else(|| "--:--".to_string())
+        ));
+
+        let seek: Element<Message> = match self.player_duration {
+            Some(d) if d > 0.0 => iced::widget::slider(0.0..=d, self.player_position.min(d), Message::Seek)
+                .step(1.0)
+                .width(Length::Fill)
+                .into(),
+            _ => text(if np.seen_active { "" } else { "Starting mpv..." }).width(Length::Fill).into(),
+        };
+
+        let volume = iced::widget::slider(0.0..=130.0, self.volume, Message::SetVolume)
+            .step(1.0)
+            .width(Length::Fixed(120.0));
+
+        container(
+            column![
+                text(format!("Now playing: {}", np.title)).size(14),
+                row![
+                    back,
+                    play_pause,
+                    fwd,
+                    stop,
+                    time_label,
+                    seek,
+                    text(format!("🔊 {:.0}", self.volume)),
+                    volume,
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+            ]
+            .spacing(6)
+            .padding(10),
+        )
+        .width(Length::Fill)
+        .style(container::bordered_box)
+        .into()
+    }
+
+    /// "Add library" controls: typed path + native folder picker
+    fn view_add_library(&self) -> Element<'_, Message> {
+        row![
+            text_input("Folder path, e.g. ~/Videos", &self.library_path_input)
+                .on_input(Message::LibraryPathChanged)
+                .on_submit(Message::AddLibraryFromInput)
+                .padding(10)
+                .width(Length::Fixed(420.0)),
+            button(text("Add")).on_press(Message::AddLibraryFromInput).padding(10),
+            button(text("Browse...")).on_press(Message::PickFolder).padding(10),
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center)
         .into()
     }
 
@@ -1193,10 +1379,8 @@ impl RustMediaHub {
         container(
             column![
                 text("No media found").size(32),
-                text("Add a library folder to get started").size(16),
-                button(text("Add Library Folder"))
-                    .on_press(Message::PickFolder)
-                    .padding(15),
+                text("Add a folder with videos or music to get started").size(16),
+                self.view_add_library(),
             ]
             .spacing(20)
             .align_x(iced::Alignment::Center)
@@ -1221,15 +1405,22 @@ impl RustMediaHub {
 
         let watched_indicator = if is_watched {
             text("✓").style(text::success)
+        } else if item.watch_progress > 0 {
+            text(format!("⏱ {}", format_duration(item.watch_progress as f64))).size(12)
         } else {
             text("")
         };
+        let is_audio = std::path::Path::new(&item.file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(rmh_core::is_audio_file)
+            .unwrap_or(false);
 
         let card_content = column![
             container(
                 // Placeholder for poster - would use image widget with actual poster
                 column![
-                    text("🎬").size(48),
+                    text(if is_audio { "🎵" } else { "🎬" }).size(48),
                 ]
                 .align_x(iced::Alignment::Center)
             )
@@ -1566,6 +1757,7 @@ impl RustMediaHub {
                 text("TMDB API Key"),
                 text_input("Enter TMDB API Key", &self.settings_view.tmdb_api_key_input)
                     .on_input(Message::UpdateTmdbApiKey)
+                    .secure(true)
                     .padding(10),
             ].spacing(5),
             
@@ -1583,7 +1775,10 @@ impl RustMediaHub {
         ]
         .spacing(20);
 
-        let mpv_status = text("✓ Player: Integrated (libmpv2)").style(text::success);
+        let mpv_status = match &self.mpv_version {
+            Some(v) => text(format!("✓ Player: {} (external window, IPC)", v)).style(text::success),
+            None => text("✗ Player: mpv not found. Install it with: sudo apt install mpv").style(text::danger),
+        };
 
         let rd_status = if self.scraper.is_some() {
             text("✓ Real-Debrid: Connected").style(text::success)
@@ -1608,9 +1803,7 @@ impl RustMediaHub {
         if self.libraries.is_empty() {
             return column![
                 text("No libraries configured"),
-                button(text("Add Library"))
-                    .on_press(Message::PickFolder)
-                    .padding(10),
+                self.view_add_library(),
             ]
             .spacing(10)
             .into();
@@ -1635,12 +1828,7 @@ impl RustMediaHub {
             items.push(lib_row.into());
         }
 
-        items.push(
-            button(text("+ Add Library"))
-                .on_press(Message::PickFolder)
-                .padding(10)
-                .into()
-        );
+        items.push(self.view_add_library());
 
         Column::with_children(items)
             .spacing(5)
@@ -1663,5 +1851,86 @@ fn format_duration(seconds: f64) -> String {
         format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
     } else {
         format!("{:02}:{:02}", minutes, seconds)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn make_clip(dir: &std::path::Path) -> Option<PathBuf> {
+        let out = dir.join("Ui.Test.Clip.mp4");
+        let ok = std::process::Command::new("ffmpeg")
+            .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=8:size=160x120:rate=25",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(&out)
+            .status()
+            .ok()?
+            .success();
+        ok.then_some(out)
+    }
+
+    fn tick_until(app: &mut RustMediaHub, what: &str, f: impl Fn(&RustMediaHub) -> bool) {
+        let start = Instant::now();
+        while !f(app) {
+            assert!(start.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(50));
+            let _ = app.update(Message::Tick);
+        }
+    }
+
+    /// Drives the real update() state machine: library item -> play -> pause -> seek -> volume -> stop.
+    #[test]
+    fn ui_playback_flow_with_headless_mpv() {
+        if Player::mpv_version("mpv").is_none() {
+            eprintln!("skipping: mpv not installed");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("rmh-ui-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let Some(clip) = make_clip(&dir) else {
+            eprintln!("skipping: ffmpeg not available");
+            return;
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, _) = RustMediaHub::new();
+        app.player = Player::new(PlayerConfig { headless: true, hwdec: "no".into(), ..Default::default() });
+
+        let item = MediaItem::from_scan(clip.to_string_lossy().into(), "Ui.Test.Clip.mp4".into(), 1);
+        let id = item.id;
+        let _ = app.update(Message::MediaLoaded(Ok(vec![item])));
+        assert_eq!(app.media_items.len(), 1);
+
+        let _ = app.update(Message::PlayMedia(id));
+        assert!(app.now_playing.is_some(), "now-playing bar should appear");
+        tick_until(&mut app, "playback", |a| a.player_duration.is_some() && a.player_position > 0.2);
+
+        let _ = app.update(Message::TogglePause);
+        tick_until(&mut app, "pause", |a| a.player.snapshot().paused);
+
+        let _ = app.update(Message::Seek(5.0));
+        tick_until(&mut app, "seek", |a| (a.player_position - 5.0).abs() < 0.5);
+
+        let _ = app.update(Message::SetVolume(40.0));
+        tick_until(&mut app, "volume", |a| (a.volume - 40.0).abs() < 0.01);
+
+        let _ = app.update(Message::StopPlayback);
+        assert!(app.now_playing.is_none());
+        // Progress is remembered on the item for resume
+        assert!(app.media_items[0].watch_progress >= 4);
+
+        // Missing file -> visible error, nothing playing
+        let mut missing = MediaItem::from_scan("/nope/missing.mkv".into(), "missing.mkv".into(), 1);
+        missing.id = Uuid::new_v4();
+        let mid = missing.id;
+        app.media_items.push(missing);
+        let _ = app.update(Message::PlayMedia(mid));
+        assert!(app.error_message.is_some());
+        assert!(app.now_playing.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

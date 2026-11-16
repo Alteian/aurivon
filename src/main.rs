@@ -13,14 +13,10 @@ fn main() -> Result<()> {
     // Initialize logging
     init_logging();
 
-    // Prefer X11 if available (better compatibility for MPV embedding), 
-    // but don't force it hard if the user really wants native Wayland.
-    #[cfg(target_os = "linux")]
-    if std::env::var("WAYLAND_DISPLAY").is_ok() && std::env::var("WINIT_UNIX_BACKEND").is_err() {
-        // We are on Wayland. Embedding MPV requires XWayland or custom rendering.
-        // If we don't set this, Iced uses Wayland native, and MPV spawns a separate window.
-        // If the user wants embedding, they should run with WINIT_UNIX_BACKEND=x11
-        info!("Running on Wayland. For integrated player support, run with WINIT_UNIX_BACKEND=x11");
+    // Video plays in mpv's own window, controlled from the app's now-playing bar.
+    // Experimental: RMH_EMBED_PLAYER=1 embeds mpv into the app window (X11/XWayland only).
+    if std::env::var("RMH_EMBED_PLAYER").as_deref() == Ok("1") {
+        info!("RMH_EMBED_PLAYER=1: mpv will be embedded into the main window (X11 only)");
     }
 
     info!("Starting RustMediaHub");
