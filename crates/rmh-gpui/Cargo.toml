@@ -1,0 +1,13 @@
+[package]
+name = "rmh-gpui"
+description = "GPUI front end for RustMediaHub (same gpui-kit stack as Kalyreon)"
+version.workspace = true
+edition = "2024"
+rust-version = "1.88"
+license.workspace = true
+
+[dependencies]
+gpui-kit = "=0.7.3"
+rmh-app = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }

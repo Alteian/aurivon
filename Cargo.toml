@@ -10,6 +10,8 @@ members = [
     "crates/rmh-torrent",
     "crates/rmh-scraper",
     "crates/rmh-ui",
+    "crates/rmh-app",
+    "crates/rmh-gpui",
 ]
 
 [workspace.package]
@@ -76,6 +78,8 @@ rmh-addon = { path = "crates/rmh-addon" }
 rmh-torrent = { path = "crates/rmh-torrent" }
 rmh-scraper = { path = "crates/rmh-scraper" }
 rmh-ui = { path = "crates/rmh-ui" }
+rmh-app = { path = "crates/rmh-app" }
+rmh-gpui = { path = "crates/rmh-gpui" }
 
 [package]
 name = "rustmediahub"
@@ -85,21 +89,28 @@ rust-version.workspace = true
 license.workspace = true
 description = "A lightweight, performant media center application"
 
+[[bin]]
+name = "rustmediahub"
+path = "src/main.rs"
+
+# Legacy iced UI: cargo run --features iced --bin rustmediahub-iced
+[[bin]]
+name = "rustmediahub-iced"
+path = "src/iced_main.rs"
+required-features = ["iced"]
+
+[features]
+default = []
+iced = ["dep:rmh-ui", "dep:iced"]
+
 [dependencies]
-rmh-core.workspace = true
-rmh-database.workspace = true
-rmh-scanner.workspace = true
-rmh-metadata.workspace = true
-rmh-player.workspace = true
-rmh-addon.workspace = true
-rmh-ui.workspace = true
-iced.workspace = true
-tokio.workspace = true
+rmh-gpui.workspace = true
+rmh-ui = { workspace = true, optional = true }
+iced = { workspace = true, optional = true }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 dotenvy.workspace = true
-dirs.workspace = true
 
 [profile.release]
 panic = "abort"
