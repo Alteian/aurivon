@@ -41,3 +41,7 @@ target
 # Windows release artifacts
 windows_release/
 windows_release.zip
+
+# Local copies and screenshots
+windows_release*/
+mpv-shot*.jpg

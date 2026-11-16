@@ -44,6 +44,8 @@ pub struct RustMediaHub {
     movie_search_results: Vec<MovieSearchResult>,
     /// Selected movie from TMDB search
     selected_movie: Option<usize>,
+    /// Main window ID (XID) for MPV embedding
+    window_id: Option<u64>,
     /// Discover stream results (from scraper)
     discover_results: Vec<ScrapedResult>,
     /// Is discover search in progress
@@ -60,6 +62,12 @@ pub struct RustMediaHub {
     active_stream: Option<TorrentStream>,
     /// Settings view state
     settings_view: crate::views::SettingsView,
+    /// Frame buffer for software rendering (Wayland fallback)
+    video_frame: Option<iced::widget::image::Handle>,
+    /// Player state
+    player_position: f64,
+    player_duration: Option<f64>,
+    is_paused: bool,
 }
 
 
@@ -95,7 +103,12 @@ pub enum Message {
     
     // Playback
     PlayMedia(Uuid),
+    PlayStreamUrl(String),
     PlaybackStarted(Result<(), String>),
+    Tick, // Frame update loop
+    TogglePause,
+    Seek(f64),
+    StopPlayback,
     
     // Settings
     UpdateTmdbApiKey(String),
@@ -122,7 +135,6 @@ pub enum Message {
     DiscoverResultsLoaded(Result<Vec<ScrapedResultData>, String>),
     SelectDiscoverResult(usize),
     PlayDiscoverResult(usize),
-    PlayStreamUrl(String),
     
     // Back navigation in discover
     BackToMovieSearch,
@@ -188,6 +200,11 @@ impl RustMediaHub {
             discover_query: String::new(),
             movie_search_results: Vec::new(),
             selected_movie: None,
+            window_id: None,
+            video_frame: None,
+            player_position: 0.0,
+            player_duration: None,
+            is_paused: false,
             discover_results: Vec::new(),
             is_searching: false,
             scraper,
@@ -232,6 +249,28 @@ impl RustMediaHub {
         "RustMediaHub".to_string()
     }
 
+    /// Try to find and attach the window ID if not already set
+    fn ensure_window_id(&mut self) {
+        if self.window_id.is_none() {
+             #[cfg(target_os = "linux")]
+             // We search for the window by title. This requires the window to be mapped.
+             // On macOS/Windows, this might require different implementation.
+             if let Some(wid) = crate::window::find_window_by_title("RustMediaHub") {
+                 info!("Found main window ID: {}", wid);
+                 self.window_id = Some(wid);
+                 
+                 // Update player config with wid
+                 let mut config = self.player.get_config();
+                 config.wid = Some(wid as i64);
+                 self.player.set_config(config);
+             } else {
+                // If we are on Wayland native, find_window_by_title might fail or return nothing useful for mpv.
+                // We just log it. MPV will open in a separate window.
+                info!("Could not find main window ID (using Wayland native?). MPV will launch in separate window.");
+             }
+        }
+    }
+
     /// Update application state based on message
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
@@ -251,6 +290,7 @@ impl RustMediaHub {
             }
 
             Message::TorrentStreamReady(result) => {
+                self.ensure_window_id();
                 match result {
                     Ok(stream) => {
                         self.status_message = format!("Playing: {}", stream.info.filename);
@@ -543,6 +583,7 @@ impl RustMediaHub {
             }
 
             Message::PlayMedia(id) => {
+                self.ensure_window_id();
                 if let Some(item) = self.media_items.iter().find(|m| m.id == id) {
                     let path = PathBuf::from(&item.file_path);
                     let progress = item.watch_progress;
@@ -568,6 +609,46 @@ impl RustMediaHub {
                         self.error_message = Some(e);
                     }
                 }
+                Task::none()
+            }
+
+            Message::Tick => {
+                // If MPV is running (no window ID means separate window or SW), update state
+                if self.window_id.is_none() {
+                   
+                   // Update playback state
+                   if let Some(pos) = self.player.get_time_pos() {
+                       self.player_position = pos;
+                   }
+                   if let Some(dur) = self.player.get_duration() {
+                       self.player_duration = Some(dur);
+                   }
+                   self.is_paused = self.player.is_paused();
+                }
+                Task::none()
+            }
+
+            Message::TogglePause => {
+                let _ = self.player.set_paused(!self.is_paused);
+                self.is_paused = !self.is_paused; // Optimistic update
+                Task::none()
+            }
+
+            Message::Seek(pos) => {
+                let _ = self.player.seek(pos);
+                self.player_position = pos; // Optimistic update
+                Task::none()
+            }
+
+            Message::StopPlayback => {
+                let _ = self.player.stop();
+                self.video_frame = None;
+                // self.active_stream = None; // User wants to keep cache? Maybe keep stream alive in background?
+                // If we drop active_stream, the HTTP server and download stop.
+                // Keeping it around allows resuming later or other players to connect.
+                // But generally stopping playback means "done watching".
+                // If user wants to just go back, maybe we should keep it.
+                // For now, let's keep active_stream but clear video_frame to return to UI.
                 Task::none()
             }
 
@@ -878,6 +959,7 @@ impl RustMediaHub {
             }
 
             Message::PlayStreamUrl(url) => {
+                self.ensure_window_id();
                 if let Err(e) = self.player.play_url(&url) {
                     self.error_message = Some(format!("Playback error: {}", e));
                 } else {
@@ -888,8 +970,92 @@ impl RustMediaHub {
         }
     }
 
+    /// Application subscription
+    pub fn subscription(&self) -> iced::Subscription<Message> {
+        let mut subs = Vec::new();
+        
+        // Only tick if player is active and we are in software rendering mode (no window ID)
+        if self.window_id.is_none() && self.player.is_active() {
+            subs.push(iced::time::every(std::time::Duration::from_millis(16)).map(|_| Message::Tick));
+        }
+
+        // Add keyboard listener if player is active (video_frame is Some)
+        if self.video_frame.is_some() {
+             subs.push(
+                 iced::event::listen_with(|event, _status, _window| {
+                    if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event {
+                        match key {
+                           iced::keyboard::Key::Named(iced::keyboard::key::Named::Backspace) => Some(Message::StopPlayback),
+                           iced::keyboard::Key::Named(iced::keyboard::key::Named::Space) => Some(Message::TogglePause),
+                           iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) => Some(Message::StopPlayback),
+                           _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                 })
+             );
+        }
+
+        iced::Subscription::batch(subs)
+    }
+
     /// Render the application view
     pub fn view(&self) -> Element<'_, Message> {
+        // If we have a video frame (software rendering), show it with controls
+        if let Some(handle) = &self.video_frame {
+             let image_widget = iced::widget::image(handle.clone())
+                     .width(Length::Fill)
+                     .height(Length::Fill)
+                     .content_fit(iced::ContentFit::Contain);
+            
+             // Controls
+             let play_pause_icon = if self.is_paused { "▶" } else { "⏸" };
+             let play_btn = button(text(play_pause_icon).size(20))
+                .on_press(Message::TogglePause)
+                .padding(10);
+                
+             let stop_btn = button(text("⏹").size(20))
+                .on_press(Message::StopPlayback)
+                .padding(10);
+             
+             let current_time_str = format_duration(self.player_position);
+             let total_time_str = self.player_duration.map(format_duration).unwrap_or_else(|| "--:--".to_string());
+             
+             let time_label = text(format!("{} / {}", current_time_str, total_time_str)).style(text::secondary);
+             
+             let slider = if let Some(duration) = self.player_duration {
+                 iced::widget::slider(0.0..=duration, self.player_position, Message::Seek)
+                     .step(1.0)
+                     .width(Length::Fill)
+             } else {
+                 iced::widget::slider(0.0..=100.0, 0.0, |_| Message::Tick).width(Length::Fill) // Dummy slider
+             };
+
+             let controls = container(
+                 row![
+                    play_btn,
+                    stop_btn,
+                    time_label,
+                    slider
+                 ]
+                 .spacing(10)
+                 .align_y(iced::Alignment::Center)
+                 .padding(10)
+             )
+             .style(container::dark)
+             .width(Length::Fill);
+
+             // Vertical layout: Image takes remaining space, controls at bottom
+             return column![
+                 container(image_widget).width(Length::Fill).height(Length::Fill).style(container::dark),
+                 controls
+             ]
+             .width(Length::Fill)
+             .height(Length::Fill)
+             .into();
+        }
+
         let content: Element<Message> = match self.current_view {
             View::Library => self.view_library(),
             View::Discover => self.view_discover(),
@@ -1485,5 +1651,17 @@ impl RustMediaHub {
 impl Default for RustMediaHub {
     fn default() -> Self {
         Self::new().0
+    }
+}
+
+fn format_duration(seconds: f64) -> String {
+    let seconds = seconds as u64;
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let seconds = seconds % 60;
+    if hours > 0 {
+        format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+    } else {
+        format!("{:02}:{:02}", minutes, seconds)
     }
 }
