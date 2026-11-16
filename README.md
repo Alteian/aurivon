@@ -6,7 +6,8 @@ A lightweight, high-performance media center application built entirely in Rust.
 
 - 🎬 **Native GPU-accelerated UI** - Uses Iced with wgpu (Vulkan/Metal/DX12)
 - 🔌 **Extensible Addon System** - Stremio-compatible plugin architecture
-- 📂 **Library Management** - Scan directories for video files
+- 📂 **Library Management** - Scan directories for video and audio files
+- ⏯️ **In-app playback controls** - Play/pause, seek, ±10s, volume, stop, resume where you left off
 - 🎯 **Metadata Fetching** - Automatic metadata from TMDB (The Movie Database)
 - ▶️ **Hardware-Accelerated Playback** - Uses MPV with `--hwdec=auto`
 - 💾 **SQLite Database** - Fast, embedded storage with compile-time checked queries
@@ -22,10 +23,23 @@ rustmediahub/
 │   ├── rmh-database/      # SQLx + SQLite repository layer
 │   ├── rmh-scanner/       # Recursive directory scanner
 │   ├── rmh-metadata/      # TMDB API client
-│   ├── rmh-player/        # MPV process management
+│   ├── rmh-player/        # UI-agnostic mpv player (JSON IPC)
 │   ├── rmh-addon/         # Stremio-compatible addon system
+│   ├── rmh-torrent/       # Torrent streaming engine
+│   ├── rmh-scraper/       # Stream scrapers / Real-Debrid
 │   └── rmh-ui/            # Iced GUI components
 ```
+
+### Playback architecture
+
+Video is played by `mpv` running as a separate process in its own window, controlled
+over its JSON IPC socket. `rmh-player` exposes a small synchronous handle
+(`Player::play`, `set_paused`, `seek`, `seek_relative`, `set_volume`, `stop`,
+`snapshot()`) backed by its own background thread and Tokio runtime, so it does not
+depend on any GUI toolkit. The iced UI just calls those methods and polls
+`snapshot()` to draw the now-playing bar. All core crates (`rmh-core`,
+`rmh-database`, `rmh-scanner`, `rmh-player`, ...) are UI-agnostic, so a different
+front end (e.g. GPUI) can be dropped in by replacing `rmh-ui`.
 
 ## Addon System
 
@@ -85,58 +99,41 @@ impl CatalogProvider for MyAddon {
 
 ### System Dependencies
 
-**Ubuntu/Debian:**
+Runtime: **mpv** (the player). Everything else is pure Rust or already on a
+typical desktop. `libmpv-dev` is **not** needed (mpv is driven over IPC, not linked).
+
+**Ubuntu/Debian/Pop!_OS:**
 ```bash
 sudo apt update
-sudo apt install -y \
-    build-essential \
-    pkg-config \
-    libssl-dev \
-    libsqlite3-dev \
-    mpv \
-    libmpv-dev \
-    libgtk-3-dev \
-    libxkbcommon-dev \
-    libwayland-dev \
-    libvulkan-dev
+sudo apt install -y build-essential pkg-config libssl-dev \
+    mpv libxkbcommon-dev libwayland-dev libvulkan-dev
+# optional, only for running the playback tests:
+sudo apt install -y ffmpeg
 ```
+
+The "Browse..." folder picker uses the XDG desktop portal (`xdg-desktop-portal`,
+present on GNOME/KDE/COSMIC). If it is unavailable, type the folder path instead.
 
 **Fedora:**
 ```bash
-sudo dnf install -y \
-    gcc gcc-c++ \
-    pkg-config \
-    openssl-devel \
-    sqlite-devel \
-    mpv mpv-libs-devel \
-    gtk3-devel \
-    libxkbcommon-devel \
-    wayland-devel \
-    vulkan-loader-devel
+sudo dnf install -y gcc gcc-c++ pkg-config openssl-devel mpv \
+    libxkbcommon-devel wayland-devel vulkan-loader-devel
 ```
 
 **Arch Linux:**
 ```bash
-sudo pacman -S --needed \
-    base-devel \
-    pkgconf \
-    openssl \
-    sqlite \
-    mpv \
-    gtk3 \
-    libxkbcommon \
-    wayland \
-    vulkan-icd-loader
+sudo pacman -S --needed base-devel pkgconf openssl mpv libxkbcommon wayland vulkan-icd-loader
 ```
 
 **macOS:**
 ```bash
-brew install mpv openssl sqlite pkg-config
+brew install mpv pkg-config
 ```
 
 **Windows:**
 1. Install [MSVC Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
 2. Install [MPV](https://mpv.io/installation/) and add to PATH
+   (note: the IPC player currently uses Unix sockets, so playback is Linux/macOS only for now)
 
 ### Rust
 
@@ -203,28 +200,45 @@ Application data is stored in:
    cargo run --release
    ```
 
-2. **Add a library:** Click "Add Library Folder" and select a directory containing video files.
+2. **Add a library:** On the Library page (or Settings → Libraries) type a folder path
+   such as `~/Videos` and press Enter / **Add**, or click **Browse...** to pick one.
 
-3. **Scan for media:** The scanner will recursively find all supported video files:
-   - `.mkv`, `.mp4`, `.avi`, `.mov`, `.wmv`, `.flv`, `.webm`
-   - `.m4v`, `.mpg`, `.mpeg`, `.ts`, `.m2ts`
+3. **Scan:** the folder is scanned recursively right after adding it. Use **Scan** in
+   Settings to pick up new files later, and **Refresh** to reload the grid.
 
-4. **Play a video:** Click on any media card to launch MPV with hardware acceleration.
+4. **Play:** click a card. mpv opens in its own window; the app shows a
+   **Now playing** bar with ⏪10s / Play-Pause / 10s⏩ / Stop, a seek slider, time and
+   volume. Closing the mpv window also ends playback. Progress is saved and playback
+   resumes from there next time; items watched past 90% are marked ✓.
 
-## Keyboard Shortcuts (MPV)
+### App shortcuts (while something plays)
 
-When a video is playing:
 - `Space` - Pause/Play
-- `←/→` - Seek 5 seconds
-- `↑/↓` - Volume
-- `f` - Toggle fullscreen
-- `s` - Screenshot
-- `q` - Quit
+- `←/→` - Seek 10 seconds
 
-## Supported Video Formats
+### mpv window shortcuts
 
-The scanner recognizes these extensions:
-`mkv`, `mp4`, `avi`, `mov`, `wmv`, `flv`, `webm`, `m4v`, `mpg`, `mpeg`, `ts`, `m2ts`
+- `Space` - Pause/Play, `←/→` - Seek 5 s, `↑/↓` - Seek 1 min, `9/0` - Volume
+- `f` - Toggle fullscreen, `s` - Screenshot, `q` - Quit
+
+### Test the player without the GUI
+
+```bash
+cargo run -p rmh-player --example play -- /path/to/video.mkv
+# then type: p (pause), s 60 (seek), v 50 (volume), q (stop)
+```
+
+### Experimental: embed mpv into the app window
+
+`RMH_EMBED_PLAYER=1 WINIT_UNIX_BACKEND=x11 cargo run` embeds mpv via `--wid` (X11/XWayland only).
+The video then covers the app window; press `q` in it to return.
+
+## Supported Formats
+
+The scanner recognizes these extensions (mpv plays almost anything):
+
+- Video: `mkv`, `mp4`, `avi`, `mov`, `wmv`, `flv`, `webm`, `m4v`, `mpg`, `mpeg`, `ts`, `m2ts`
+- Audio: `mp3`, `flac`, `ogg`, `opus`, `m4a`, `aac`, `wav`, `wma`, `alac`, `aiff`
 
 ## Development
 
@@ -236,7 +250,7 @@ The scanner recognizes these extensions:
 | `rmh-database` | SQLite database with SQLx, migrations, repository pattern |
 | `rmh-scanner` | Async directory traversal using `walkdir` |
 | `rmh-metadata` | TMDB API client with `reqwest` |
-| `rmh-player` | MPV process spawning with HW acceleration |
+| `rmh-player` | UI-agnostic mpv controller over JSON IPC (play/pause/seek/volume/stop, state snapshot) |
 | `rmh-addon` | Stremio-compatible addon system (catalogs, streams, metadata, subtitles) |
 | `rmh-ui` | Iced application, views, components |
 
@@ -245,6 +259,12 @@ The scanner recognizes these extensions:
 ```bash
 cargo test --workspace
 ```
+
+With `mpv` and `ffmpeg` installed this also runs end-to-end playback tests: an 8 s
+test clip is generated and played through a headless mpv (`--vo=null --ao=null`),
+checking load, progress, pause, seek, volume, stop, resume position and error
+reporting, both at the `rmh-player` level and through the UI's `update()` logic.
+Without them those tests skip themselves.
 
 ### Database Migrations
 
@@ -262,10 +282,17 @@ cargo build
 
 ### MPV Not Found
 
-Ensure MPV is installed and in your PATH:
+Settings → Status shows whether mpv was found. Install it and make sure it is on PATH:
 
 ```bash
+sudo apt install mpv
 mpv --version
+```
+
+### Playback logs
+
+```bash
+RUST_LOG=info,rmh_player=debug cargo run
 ```
 
 ### Database Errors

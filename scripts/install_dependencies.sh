@@ -20,10 +20,8 @@ case "$OS" in
             build-essential \
             pkg-config \
             libssl-dev \
-            libsqlite3-dev \
-            libmpv-dev \
             mpv \
-            libgtk-3-dev \
+            ffmpeg \
             libxkbcommon-dev \
             libwayland-dev \
             libvulkan-dev
@@ -34,10 +32,7 @@ case "$OS" in
             gcc gcc-c++ \
             pkg-config \
             openssl-devel \
-            sqlite-devel \
-            mpv-libs-devel \
             mpv \
-            gtk3-devel \
             libxkbcommon-devel \
             wayland-devel \
             vulkan-loader-devel
@@ -48,9 +43,7 @@ case "$OS" in
             base-devel \
             pkgconf \
             openssl \
-            sqlite \
             mpv \
-            gtk3 \
             libxkbcommon \
             wayland \
             vulkan-icd-loader
