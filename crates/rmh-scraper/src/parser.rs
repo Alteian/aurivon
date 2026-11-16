@@ -137,8 +137,9 @@ pub fn parse_torrent_title(title: &str) -> TorrentInfo {
         Regex::new(r"(?i)\b(2160p|4k|1080p|720p|480p|1080i|720i)\b").unwrap()
     });
     if let Some(cap) = RESOLUTION_RE.captures(title) {
-        let res = cap[1].to_uppercase();
-        info.resolution = Some(if res == "4K" { "2160p".to_string() } else { res });
+        // Normalise to lowercase ("1080p") so quality_score() matches
+        let res = cap[1].to_lowercase();
+        info.resolution = Some(if res == "4k" { "2160p".to_string() } else { res });
     }
 
     // Quality/Source
@@ -156,8 +157,8 @@ pub fn parse_torrent_title(title: &str) -> TorrentInfo {
     if let Some(cap) = CODEC_RE.captures(title) {
         let codec = cap[1].to_uppercase().replace(".", "");
         info.codec = Some(match codec.as_str() {
-            "H264" | "AVC" => "x264".to_string(),
-            "H265" | "HEVC" => "x265".to_string(),
+            "H264" | "AVC" | "X264" => "x264".to_string(),
+            "H265" | "HEVC" | "X265" => "x265".to_string(),
             _ => codec,
         });
     }
