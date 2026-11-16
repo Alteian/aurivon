@@ -65,5 +65,5 @@ impl Database {
     }
 }
 
-pub use repository::MediaRepository;
+pub use repository::{MediaLink, MediaRepository};
 

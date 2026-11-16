@@ -4,6 +4,7 @@
 //! [`PlaybackSnapshot`] on every poll and acts on the returned [`TickOutcome`].
 
 use rmh_player::PlaybackSnapshot;
+use rmh_trakt::{Item as TraktItem, ScrobbleAction};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -27,6 +28,10 @@ pub struct NowPlaying {
     pub paused: bool,
     pub volume: f64,
     pub eof: bool,
+    /// What to scrobble to Trakt (None = not linked / not a library match)
+    pub trakt: Option<TraktItem>,
+    /// Last scrobble action sent
+    pub scrobbled: Option<ScrobbleAction>,
 }
 
 /// Progress to persist for a library item
@@ -63,7 +68,44 @@ impl NowPlaying {
             paused: false,
             volume,
             eof: false,
+            trakt: None,
+            scrobbled: None,
         }
+    }
+
+    pub fn with_trakt(mut self, item: Option<TraktItem>) -> Self {
+        self.trakt = item;
+        self
+    }
+
+    /// Percent watched (0-100)
+    pub fn percent(&self) -> f64 {
+        match self.duration {
+            Some(d) if d > 0.0 => (self.position / d * 100.0).clamp(0.0, 100.0),
+            _ => 0.0,
+        }
+    }
+
+    /// Scrobble to send after a tick: `start` when (re)playing, `pause` when paused
+    pub fn scrobble_update(&mut self) -> Option<(TraktItem, ScrobbleAction, f64)> {
+        let item = self.trakt.clone()?;
+        if !self.seen_active || self.duration.is_none_or(|d| d <= 0.0) || self.eof {
+            return None;
+        }
+        let want = if self.paused { ScrobbleAction::Pause } else { ScrobbleAction::Start };
+        if self.scrobbled == Some(want) || (want == ScrobbleAction::Pause && self.scrobbled.is_none()) {
+            return None;
+        }
+        self.scrobbled = Some(want);
+        Some((item, want, self.percent()))
+    }
+
+    /// Final `stop` scrobble when playback ends (Trakt marks >= 80% as watched)
+    pub fn scrobble_stop(&mut self) -> Option<(TraktItem, ScrobbleAction, f64)> {
+        let item = self.trakt.clone()?;
+        self.scrobbled.take()?;
+        let pct = if self.eof { 100.0 } else { self.percent() };
+        Some((item, ScrobbleAction::Stop, pct))
     }
 
     /// Progress update for the current position (None for streams)
@@ -148,6 +190,26 @@ mod tests {
         assert_eq!(np.tick(&snap(false, 0.0, 0.0)), TickOutcome::Ended(None));
         let bad = PlaybackSnapshot { last_error: Some("boom".into()), ..Default::default() };
         assert_eq!(np.tick(&bad), TickOutcome::Failed("boom".into()));
+    }
+
+    #[test]
+    fn scrobble_state_machine() {
+        let item = TraktItem::Movie { tmdb: 603 };
+        let mut np = NowPlaying::new("m", None, 100.0).with_trakt(Some(item.clone()));
+        assert_eq!(np.scrobble_update(), None); // not started yet
+        np.tick(&snap(true, 10.0, 100.0));
+        assert_eq!(np.scrobble_update(), Some((item.clone(), ScrobbleAction::Start, 10.0)));
+        assert_eq!(np.scrobble_update(), None);
+        np.tick(&PlaybackSnapshot { paused: true, ..snap(true, 50.0, 100.0) });
+        assert_eq!(np.scrobble_update(), Some((item.clone(), ScrobbleAction::Pause, 50.0)));
+        np.tick(&snap(true, 85.0, 100.0));
+        assert_eq!(np.scrobble_update().map(|s| s.1), Some(ScrobbleAction::Start));
+        assert_eq!(np.scrobble_stop(), Some((item, ScrobbleAction::Stop, 85.0)));
+        assert_eq!(np.scrobble_stop(), None);
+        // no Trakt link -> nothing
+        let mut plain = NowPlaying::new("x", None, 100.0);
+        plain.tick(&snap(true, 10.0, 100.0));
+        assert_eq!(plain.scrobble_update(), None);
     }
 
     #[test]

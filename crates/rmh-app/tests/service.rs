@@ -14,7 +14,7 @@ fn library_lifecycle_through_service() {
     File::create(media.join("Some.Film.2021.mkv")).unwrap();
     File::create(media.join("song.flac")).unwrap();
 
-    let cfg = AppConfig { tmdb_api_key: None, real_debrid_api_key: None, default_library_path: None, mpv_path: None, volume: None };
+    let cfg = AppConfig { tmdb_api_key: None, real_debrid_api_key: None, trakt_client_id: None, trakt_client_secret: None, ..AppConfig::default() };
     let svc = MediaService::with_paths(dir.path().join("lib.db"), cfg).unwrap();
 
     assert!(block_on(svc.add_library("/definitely/missing")).is_err());
@@ -39,4 +39,28 @@ fn library_lifecycle_through_service() {
 
     // Discover without a TMDB key gives a friendly error, not a panic
     assert!(block_on(svc.search_movies("matrix")).unwrap_err().contains("TMDB"));
+}
+
+/// Seek-bar previews: one cached frame per 5 s bucket (skipped without ffmpeg)
+#[test]
+fn seek_thumbnails_are_cached_per_bucket() {
+    let dir = tempfile::tempdir().unwrap();
+    let clip = dir.path().join("clip.mkv");
+    let made = std::process::Command::new("ffmpeg")
+        .args(["-nostdin", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10:duration=12"])
+        .arg(&clip)
+        .status();
+    if !matches!(made, Ok(s) if s.success()) {
+        eprintln!("ffmpeg not available, skipping");
+        return;
+    }
+    let cfg = AppConfig { tmdb_api_key: None, real_debrid_api_key: None, trakt_client_id: None, trakt_client_secret: None, ..AppConfig::default() };
+    let svc = MediaService::with_paths(dir.path().join("lib.db"), cfg).unwrap();
+    let src = clip.to_string_lossy().to_string();
+    let a = block_on(svc.thumbnail(src.clone(), 6.2)).unwrap();
+    let b = block_on(svc.thumbnail(src.clone(), 9.9)).unwrap();
+    let c = block_on(svc.thumbnail(src, 1.0)).unwrap();
+    assert!(a.exists() && std::fs::metadata(&a).unwrap().len() > 0);
+    assert_eq!(a, b, "same 5 s bucket reuses the frame");
+    assert_ne!(a, c);
 }

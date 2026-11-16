@@ -83,19 +83,24 @@ pub struct ResolvedStream {
     pub title: String,
 }
 
-struct Inner {
-    rt: tokio::runtime::Runtime,
-    db_path: PathBuf,
-    db: OnceCell<Database>,
-    config: RwLock<AppConfig>,
-    scraper: RwLock<Option<Arc<ScraperAddon>>>,
-    torrent: Arc<Mutex<Option<TorrentEngine>>>,
+pub(crate) struct Inner {
+    pub(crate) rt: tokio::runtime::Runtime,
+    pub(crate) db_path: PathBuf,
+    pub(crate) db: OnceCell<Database>,
+    pub(crate) config: RwLock<AppConfig>,
+    pub(crate) scraper: RwLock<Option<Arc<ScraperAddon>>>,
+    pub(crate) torrent: Arc<Mutex<Option<TorrentEngine>>>,
+    pub(crate) trakt: RwLock<Option<rmh_trakt::TraktClient>>,
+    pub(crate) http: reqwest::Client,
+    /// Poster / still image cache
+    pub(crate) image_dir: PathBuf,
+    pub(crate) trakt_token_path: PathBuf,
 }
 
 /// Cloneable handle to the application services
 #[derive(Clone)]
 pub struct MediaService {
-    inner: Arc<Inner>,
+    pub(crate) inner: Arc<Inner>,
 }
 
 impl MediaService {
@@ -115,6 +120,21 @@ impl MediaService {
             .thread_name("rmh-service")
             .enable_all()
             .build()?;
+        let base = db_path.parent().map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir);
+        let image_dir = if db_path == Database::default_path().unwrap_or_default() {
+            dirs::cache_dir().unwrap_or(base.clone()).join("rustmediahub").join("images")
+        } else {
+            base.join("images")
+        };
+        let trakt_token_path = if db_path == Database::default_path().unwrap_or_default() {
+            rmh_trakt::TraktToken::default_path().unwrap_or(base.join("trakt.json"))
+        } else {
+            base.join("trakt.json")
+        };
+        let http = reqwest::Client::builder()
+            .user_agent(concat!("RustMediaHub/", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
         let svc = Self {
             inner: Arc::new(Inner {
                 rt,
@@ -123,6 +143,10 @@ impl MediaService {
                 config: RwLock::new(config),
                 scraper: RwLock::new(None),
                 torrent: Arc::new(Mutex::new(None)),
+                trakt: RwLock::new(None),
+                http,
+                image_dir,
+                trakt_token_path,
             }),
         };
         svc.rebuild_scraper();
@@ -139,7 +163,7 @@ impl MediaService {
         async move { handle.await.map_err(|e| format!("background task failed: {e}"))? }
     }
 
-    fn db(&self) -> impl Future<Output = ServiceResult<Database>> + Send + 'static {
+    pub(crate) fn db(&self) -> impl Future<Output = ServiceResult<Database>> + Send + 'static {
         let inner = self.inner.clone();
         async move {
             inner
@@ -170,11 +194,19 @@ impl MediaService {
     fn rebuild_scraper(&self) {
         let cfg = self.config();
         let mut sc = ScraperAddonConfig::default();
-        if let Some(key) = cfg.real_debrid_api_key.filter(|k| !k.trim().is_empty()) {
+        if let Some(key) = cfg.real_debrid_api_key.clone().filter(|k| !k.trim().is_empty()) {
             sc = sc.with_real_debrid(key);
         }
         if let Ok(mut s) = self.inner.scraper.write() {
             *s = Some(Arc::new(ScraperAddon::new(sc)));
+        }
+        let trakt = cfg.trakt_credentials().and_then(|(id, secret)| {
+            rmh_trakt::TraktClient::new(id, secret, self.inner.trakt_token_path.clone())
+                .map_err(|e| tracing::warn!("Trakt client: {e:#}"))
+                .ok()
+        });
+        if let Ok(mut t) = self.inner.trakt.write() {
+            *t = trakt;
         }
     }
 
@@ -286,12 +318,25 @@ impl MediaService {
 
     /// Find stream candidates for an IMDb id, best first
     pub fn search_streams(&self, imdb_id: impl Into<String>) -> impl Future<Output = ServiceResult<Vec<StreamHit>>> + 'static {
+        self.search_streams_for(imdb_id, None)
+    }
+
+    /// Stream candidates for a movie (`episode` None) or a series episode (season, episode)
+    pub fn search_streams_for(
+        &self,
+        imdb_id: impl Into<String>,
+        episode: Option<(u32, u32)>,
+    ) -> impl Future<Output = ServiceResult<Vec<StreamHit>>> + 'static {
         let imdb_id: String = imdb_id.into();
         let scraper = self.inner.scraper.read().ok().and_then(|s| s.clone());
         self.run(async move {
             let scraper = scraper.ok_or("Scraper not initialised")?;
+            let query = match episode {
+                Some((s, e)) => SearchQuery::series(&imdb_id, "", s, e),
+                None => SearchQuery::movie(&imdb_id, ""),
+            };
             let results = scraper
-                .search(&SearchQuery::movie(&imdb_id, ""))
+                .search(&query)
                 .await
                 .map_err(|e| format!("Stream search failed: {e}"))?;
             let mut hits: Vec<StreamHit> = results.iter().map(StreamHit::from).collect();

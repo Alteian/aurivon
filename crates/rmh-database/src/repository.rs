@@ -398,3 +398,75 @@ impl From<MediaItemRow> for MediaItem {
         }
     }
 }
+
+// ==================== MEDIA LINKS (TMDB / Trakt matching) ====================
+
+/// How a local file maps onto TMDB / Trakt
+#[derive(Debug, Clone, PartialEq, Default, sqlx::FromRow)]
+pub struct MediaLink {
+    pub media_id: String,
+    /// "movie", "tv" or "none" (searched, nothing found)
+    pub kind: String,
+    pub tmdb_id: Option<i64>,
+    pub imdb_id: Option<String>,
+    pub show_title: Option<String>,
+    pub season: Option<i64>,
+    pub episode: Option<i64>,
+    pub episode_title: Option<String>,
+    pub poster_path: Option<String>,
+    pub genres: Option<String>,
+    pub trakt_synced_at: Option<String>,
+}
+
+impl<'a> MediaRepository<'a> {
+    pub async fn upsert_media_link(&self, link: &MediaLink) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO media_links (media_id, kind, tmdb_id, imdb_id, show_title, season, episode,
+                                     episode_title, poster_path, genres, matched_at, trakt_synced_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(media_id) DO UPDATE SET
+                kind = excluded.kind, tmdb_id = excluded.tmdb_id, imdb_id = excluded.imdb_id,
+                show_title = excluded.show_title, season = excluded.season, episode = excluded.episode,
+                episode_title = excluded.episode_title, poster_path = excluded.poster_path,
+                genres = excluded.genres, matched_at = excluded.matched_at
+            "#,
+        )
+        .bind(&link.media_id)
+        .bind(&link.kind)
+        .bind(link.tmdb_id)
+        .bind(&link.imdb_id)
+        .bind(&link.show_title)
+        .bind(link.season)
+        .bind(link.episode)
+        .bind(&link.episode_title)
+        .bind(&link.poster_path)
+        .bind(&link.genres)
+        .bind(Utc::now().to_rfc3339())
+        .bind(&link.trakt_synced_at)
+        .execute(self.pool)
+        .await
+        .context("Failed to save media link")?;
+        Ok(())
+    }
+
+    pub async fn get_media_links(&self) -> Result<Vec<MediaLink>> {
+        sqlx::query_as::<_, MediaLink>(
+            "SELECT media_id, kind, tmdb_id, imdb_id, show_title, season, episode, episode_title, \
+             poster_path, genres, trakt_synced_at FROM media_links",
+        )
+        .fetch_all(self.pool)
+        .await
+        .context("Failed to fetch media links")
+    }
+
+    pub async fn mark_trakt_synced(&self, media_id: Uuid) -> Result<()> {
+        sqlx::query("UPDATE media_links SET trakt_synced_at = ? WHERE media_id = ?")
+            .bind(Utc::now().to_rfc3339())
+            .bind(media_id.to_string())
+            .execute(self.pool)
+            .await
+            .context("Failed to mark Trakt sync")?;
+        Ok(())
+    }
+}

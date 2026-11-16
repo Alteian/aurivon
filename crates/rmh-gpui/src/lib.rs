@@ -1,21 +1,36 @@
-//! GPUI front end for RustMediaHub.
-//!
-//! Built on `gpui-kit` exactly like Kalyreon's desktop app: the window hosts a
-//! single [`view::MediaHubView`]; all data/IO lives in `rmh-app` and playback
-//! in `rmh-player`, so this crate is purely presentation.
+//! GPUI front end for RustMediaHub (same gpui-kit stack as Kalyreon).
 
+mod details;
+mod embed;
+mod home;
+mod player;
+mod settings;
 mod theme;
+mod ui;
 mod view;
 
 use gpui_kit::assets::Assets;
 use gpui_kit::component::theme::{Theme, ThemeMode};
 use gpui_kit::*;
-use rmh_app::MediaService;
+use rmh_app::{AppConfig, MediaService, VideoMode};
 
 pub use view::{MediaHubView, Page};
 
+/// Embedded video needs an X11 window. On Wayland desktops (COSMIC, GNOME…)
+/// run GPUI through XWayland instead, unless the user opted out.
+fn choose_backend() {
+    let cfg = AppConfig::load().unwrap_or_default();
+    let want_embed = cfg.video_mode == VideoMode::Embedded && std::env::var_os("RMH_FORCE_WAYLAND").is_none();
+    if want_embed && std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var_os("DISPLAY").is_some() {
+        tracing::info!("Embedded video: using XWayland for the app window");
+        // SAFETY: called at startup before any other thread exists
+        unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+    }
+}
+
 /// Open the main window and run the GPUI event loop (blocks until quit).
-pub fn run() -> anyhow_like::Result {
+pub fn run() -> Result<(), String> {
+    choose_backend();
     let svc = MediaService::new().map_err(|e| format!("Failed to start services: {e:#}"))?;
 
     gpui_kit::application().with_assets(Assets).run(move |cx| {
@@ -24,8 +39,8 @@ pub fn run() -> anyhow_like::Result {
 
         let options = WindowOptions {
             titlebar: Some(TitlebarOptions { title: Some("RustMediaHub".into()), ..Default::default() }),
-            window_bounds: Some(WindowBounds::centered(size(px(1360.0), px(860.0)), cx)),
-            window_min_size: Some(size(px(960.0), px(640.0))),
+            window_bounds: Some(WindowBounds::centered(size(px(1440.0), px(900.0)), cx)),
+            window_min_size: Some(size(px(1024.0), px(680.0))),
             app_id: Some("org.rustmediahub.desktop".to_string()),
             ..Default::default()
         };
@@ -40,8 +55,4 @@ pub fn run() -> anyhow_like::Result {
         .detach();
     });
     Ok(())
-}
-
-mod anyhow_like {
-    pub type Result = std::result::Result<(), String>;
 }

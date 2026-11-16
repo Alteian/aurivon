@@ -1,93 +1,170 @@
-//! Main window: sidebar navigation, pages, now-playing bar.
+//! Main window state and actions. Rendering lives in `ui`, `home`, `player`,
+//! `details` and `settings`.
 
-use std::time::Duration;
+use std::cell::Cell;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
-use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::scroll::ScrollableElement;
-use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
-use gpui_kit::prelude::FluentBuilder;
+use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::*;
 use rmh_app::{
-    format_time, is_audio, resume_position, Library, MediaItem, MediaService, MovieHit, NowPlaying, Player,
-    PlayerConfig, ProgressUpdate, StreamHit, TickOutcome,
+    is_audio, next_episode, resume_position, Details, Episode, HomeLayout, Library, LibraryEntry, MediaService,
+    NowPlaying, PlaybackSnapshot, Player, PlayerConfig, ProgressUpdate, StreamHit, TickOutcome, TitleCard, TitleKind,
+    TraktDeviceCode, TraktItem, TraktLists, TraktStatus, VideoMode,
 };
 use uuid::Uuid;
 
-use crate::theme::{initials, tile_colors, Palette, DARK};
-
-const SEEK_STEPS: f32 = 1000.0;
+use crate::embed::VideoHost;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Home,
     Library,
     Discover,
+    Player,
+    Details,
     Settings,
 }
 
 impl Page {
-    const ALL: [Page; 4] = [Page::Home, Page::Library, Page::Discover, Page::Settings];
+    pub const NAV: [Page; 5] = [Page::Home, Page::Library, Page::Discover, Page::Player, Page::Settings];
 
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Page::Home => "Home",
             Page::Library => "Library",
             Page::Discover => "Discover",
+            Page::Player => "Now Playing",
+            Page::Details => "Details",
             Page::Settings => "Settings",
         }
     }
 
-    fn glyph(self) -> &'static str {
+    pub fn glyph(self) -> &'static str {
         match self {
             Page::Home => "⌂",
             Page::Library => "▤",
             Page::Discover => "◎",
+            Page::Player => "▶",
+            Page::Details => "ℹ",
             Page::Settings => "⚙",
         }
     }
 
-    fn subtitle(self) -> &'static str {
+    pub fn subtitle(self) -> &'static str {
         match self {
             Page::Home => "Pick up where you left off",
             Page::Library => "Everything in your local folders",
-            Page::Discover => "Find movies and stream them",
-            Page::Settings => "Libraries, keys and player",
+            Page::Discover => "Trending, search and streams",
+            Page::Player => "",
+            Page::Details => "",
+            Page::Settings => "Libraries, player and connected services",
         }
     }
 }
 
+/// Right-hand panel on the player page
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SideTab {
+    Chapters,
+    Audio,
+    Subtitles,
+    Speed,
+}
+
+/// What the details page shows
+#[derive(Clone)]
+pub struct DetailsState {
+    pub kind: Option<TitleKind>,
+    pub tmdb_id: Option<i32>,
+    /// Local library item (movie) this page was opened from
+    pub local: Option<Uuid>,
+    pub name: String,
+    pub poster: Option<PathBuf>,
+    pub details: Option<Details>,
+    pub backdrop: Option<PathBuf>,
+    pub loading: bool,
+    pub season: Option<u32>,
+    pub episodes: Vec<Episode>,
+}
+
+/// Where a stream list came from (for the Trakt item / title)
+#[derive(Clone)]
+pub struct StreamContext {
+    pub label: String,
+    pub trakt: Option<TraktItem>,
+}
+
 pub struct MediaHubView {
-    svc: MediaService,
-    player: Player,
-    page: Page,
-    libraries: Vec<Library>,
-    media: Vec<MediaItem>,
-    busy: Option<String>,
-    status: Option<String>,
-    error: Option<String>,
+    pub(crate) svc: MediaService,
+    pub(crate) player: Player,
+    pub(crate) page: Page,
+    pub(crate) back_page: Page,
+    pub(crate) libraries: Vec<Library>,
+    pub(crate) entries: Vec<LibraryEntry>,
+    pub(crate) busy: Option<String>,
+    pub(crate) status: Option<String>,
+    pub(crate) error: Option<String>,
+    pub(crate) matching: bool,
+    pub(crate) match_attempted: bool,
+    /// Libraries are rescanned once per launch so new files show up
+    startup_scanned: bool,
 
-    path_input: Entity<InputState>,
-    filter_input: Entity<InputState>,
-    discover_input: Entity<InputState>,
-    tmdb_input: Entity<InputState>,
-    rd_input: Entity<InputState>,
-    mpv_input: Entity<InputState>,
+    pub(crate) path_input: Entity<InputState>,
+    pub(crate) filter_input: Entity<InputState>,
+    pub(crate) discover_input: Entity<InputState>,
+    pub(crate) tmdb_input: Entity<InputState>,
+    pub(crate) rd_input: Entity<InputState>,
+    pub(crate) mpv_input: Entity<InputState>,
+    pub(crate) trakt_id_input: Entity<InputState>,
+    pub(crate) trakt_secret_input: Entity<InputState>,
+    pub(crate) alang_input: Entity<InputState>,
+    pub(crate) slang_input: Entity<InputState>,
 
-    movies: Vec<MovieHit>,
-    selected_movie: Option<usize>,
-    streams: Vec<StreamHit>,
-    searching: bool,
+    // discover / details
+    pub(crate) results: Vec<TitleCard>,
+    pub(crate) trending: Vec<TitleCard>,
+    pub(crate) hero_backdrop: Option<PathBuf>,
+    pub(crate) searching: bool,
+    pub(crate) details: Option<DetailsState>,
+    pub(crate) streams: Vec<StreamHit>,
+    pub(crate) stream_ctx: Option<StreamContext>,
+    pub(crate) streams_loading: bool,
 
-    now: Option<NowPlaying>,
-    seek_slider: Entity<SliderState>,
-    volume_slider: Entity<SliderState>,
-    seek_dragging: bool,
-    volume: f64,
-    mpv_version: Option<String>,
+    // trakt
+    pub(crate) trakt: TraktStatus,
+    pub(crate) trakt_code: Option<TraktDeviceCode>,
+    pub(crate) trakt_lists: TraktLists,
+    pub(crate) trakt_cards: Vec<TitleCard>,
 
-    focus_handle: FocusHandle,
+    // playback
+    pub(crate) now: Option<NowPlaying>,
+    pub(crate) snap: PlaybackSnapshot,
+    pub(crate) now_entry: Option<LibraryEntry>,
+    pub(crate) now_source: Option<String>,
+    pub(crate) eof_handled: bool,
+    pub(crate) autoplay: Option<(Instant, Uuid)>,
+    pub(crate) hover_seek: Option<f64>,
+    pub(crate) thumb: Option<(u64, PathBuf)>,
+    pub(crate) thumb_pending: bool,
+    pub(crate) seek_bounds: Rc<Cell<Bounds<Pixels>>>,
+    pub(crate) volume_slider: Entity<SliderState>,
+    pub(crate) volume: f64,
+    pub(crate) side_tab: SideTab,
+    pub(crate) theater: bool,
+    pub(crate) video: Option<Rc<VideoHost>>,
+    pub(crate) video_checked: bool,
+    pub(crate) mpv_version: Option<String>,
+
+    pub(crate) focus_handle: FocusHandle,
     _poller: Task<()>,
     _subscriptions: Vec<Subscription>,
+}
+
+fn opt(v: &Option<String>) -> String {
+    v.clone().unwrap_or_default()
 }
 
 impl MediaHubView {
@@ -95,29 +172,24 @@ impl MediaHubView {
         let config = svc.config();
         let mpv_path = config.mpv_path();
         let volume = config.volume.unwrap_or(100.0).clamp(0.0, 130.0);
-        let player = Player::new(PlayerConfig { mpv_path: mpv_path.clone(), volume: volume.min(100.0) as u8, ..Default::default() });
+        let player = Player::new(Self::player_config(&svc, None, volume));
 
-        let path_input = cx.new(|cx| InputState::new(window, cx).placeholder("Folder path, e.g. ~/Videos"));
-        let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter library… (Enter plays the top match)"));
-        let discover_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search movies by title, or paste an IMDb id (tt0133093)"));
-        let tmdb_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("TMDB API key")
-                .masked(true)
-                .default_value(config.tmdb_api_key.clone().unwrap_or_default())
-        });
-        let rd_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Real-Debrid API key (optional)")
-                .masked(true)
-                .default_value(config.real_debrid_api_key.clone().unwrap_or_default())
-        });
-        let mpv_input = cx.new(|cx| InputState::new(window, cx).placeholder("mpv").default_value(mpv_path.clone()));
+        let input = |cx: &mut Context<Self>, window: &mut Window, ph: &str, val: String, masked: bool| {
+            let ph = ph.to_string();
+            cx.new(move |cx| InputState::new(window, cx).placeholder(ph).masked(masked).default_value(val))
+        };
+        let path_input = input(cx, window, "Folder path, e.g. ~/Videos", String::new(), false);
+        let filter_input = input(cx, window, "Filter library… (Enter plays the top match)", String::new(), false);
+        let discover_input = input(cx, window, "Search movies & shows, or paste an IMDb id (tt0133093)", String::new(), false);
+        let tmdb_input = input(cx, window, "TMDB API key or read access token", opt(&config.tmdb_api_key), true);
+        let rd_input = input(cx, window, "Real-Debrid API key (optional)", opt(&config.real_debrid_api_key), true);
+        let mpv_input = input(cx, window, "mpv", mpv_path.clone(), false);
+        let trakt_id_input = input(cx, window, "Trakt client id", opt(&config.trakt_client_id), true);
+        let trakt_secret_input = input(cx, window, "Trakt client secret", opt(&config.trakt_client_secret), true);
+        let alang_input = input(cx, window, "e.g. cze,eng", opt(&config.audio_lang), false);
+        let slang_input = input(cx, window, "e.g. eng,cze", opt(&config.sub_lang), false);
 
-        let seek_slider = cx.new(|_| SliderState::new().min(0.0).max(SEEK_STEPS).step(1.0));
-        let volume_slider =
-            cx.new(|_| SliderState::new().min(0.0).max(130.0).step(1.0).default_value(volume as f32));
+        let volume_slider = cx.new(|_| SliderState::new().min(0.0).max(130.0).step(1.0).default_value(volume as f32));
 
         let subscriptions = vec![
             cx.subscribe_in(&path_input, window, |this, _, ev: &InputEvent, window, cx| {
@@ -132,27 +204,12 @@ impl MediaHubView {
             }),
             cx.subscribe_in(&filter_input, window, |this, _, ev: &InputEvent, window, cx| match ev {
                 InputEvent::Change => cx.notify(),
-                // Enter plays the top match: type-to-play from the keyboard
                 InputEvent::PressEnter { .. } => {
-                    if let Some(id) = this.filtered_media(cx).first().map(|m| m.id) {
+                    if let Some(id) = this.filtered_entries(cx).first().map(|e| e.item.id) {
                         this.play_item(id, window, cx);
                     }
                 }
                 _ => {}
-            }),
-            cx.subscribe(&seek_slider, |this, _, ev: &SliderEvent, cx| match ev {
-                SliderEvent::Change(_) => this.seek_dragging = true,
-                SliderEvent::Release(v) => {
-                    this.seek_dragging = false;
-                    if let Some(d) = this.now.as_ref().and_then(|n| n.duration) {
-                        let target = (v.start() / SEEK_STEPS) as f64 * d;
-                        let _ = this.player.seek(target);
-                        if let Some(n) = this.now.as_mut() {
-                            n.position = target;
-                        }
-                    }
-                    cx.notify();
-                }
             }),
             cx.subscribe(&volume_slider, |this, _, ev: &SliderEvent, cx| {
                 let v = match ev {
@@ -177,54 +234,138 @@ impl MediaHubView {
             svc,
             player,
             page: Page::Home,
+            back_page: Page::Home,
             libraries: Vec::new(),
-            media: Vec::new(),
+            entries: Vec::new(),
             busy: Some("Loading library…".into()),
             status: None,
             error: None,
+            matching: false,
+            match_attempted: false,
+            startup_scanned: false,
             path_input,
             filter_input,
             discover_input,
             tmdb_input,
             rd_input,
             mpv_input,
-            movies: Vec::new(),
-            selected_movie: None,
-            streams: Vec::new(),
+            trakt_id_input,
+            trakt_secret_input,
+            alang_input,
+            slang_input,
+            results: Vec::new(),
+            trending: Vec::new(),
+            hero_backdrop: None,
             searching: false,
+            details: None,
+            streams: Vec::new(),
+            stream_ctx: None,
+            streams_loading: false,
+            trakt: TraktStatus::default(),
+            trakt_code: None,
+            trakt_lists: TraktLists::default(),
+            trakt_cards: Vec::new(),
             now: None,
-            seek_slider,
+            snap: PlaybackSnapshot::default(),
+            now_entry: None,
+            now_source: None,
+            eof_handled: false,
+            autoplay: None,
+            hover_seek: None,
+            thumb: None,
+            thumb_pending: false,
+            seek_bounds: Rc::new(Cell::new(Bounds::default())),
             volume_slider,
-            seek_dragging: false,
             volume,
+            side_tab: SideTab::Chapters,
+            theater: false,
+            video: None,
+            video_checked: false,
             focus_handle,
             _poller: poller,
             _subscriptions: subscriptions,
         };
         view.reload(cx);
+        view.load_trending(cx);
+        view.refresh_trakt(cx);
         view
+    }
+
+    /// mpv settings derived from the app config
+    pub(crate) fn player_config(svc: &MediaService, wid: Option<i64>, volume: f64) -> PlayerConfig {
+        let cfg = svc.config();
+        let mut extra = vec![];
+        if let Some(a) = cfg.audio_lang.as_ref().filter(|v| !v.trim().is_empty()) {
+            extra.push(format!("--alang={}", a.trim()));
+        }
+        if let Some(s) = cfg.sub_lang.as_ref().filter(|v| !v.trim().is_empty()) {
+            extra.push(format!("--slang={}", s.trim()));
+        }
+        PlayerConfig {
+            mpv_path: cfg.mpv_path(),
+            volume: volume.min(100.0) as u8,
+            osc: cfg.mpv_osc,
+            fullscreen: wid.is_none() && cfg.video_mode == VideoMode::Window && cfg.window_fullscreen,
+            wid,
+            extra_args: extra,
+            ..Default::default()
+        }
+    }
+
+    /// Create the embedded video surface once the window exists
+    pub(crate) fn ensure_video_host(&mut self, window: &mut Window) {
+        if self.video_checked {
+            return;
+        }
+        self.video_checked = true;
+        if self.svc.config().video_mode != VideoMode::Embedded {
+            return;
+        }
+        match VideoHost::new(window) {
+            Some(host) => {
+                let wid = host.xid();
+                self.video = Some(Rc::new(host));
+                self.player.set_config(Self::player_config(&self.svc, Some(wid), self.volume));
+            }
+            None => {
+                self.status = Some("Embedded video unavailable here; mpv opens its own window".into());
+            }
+        }
+    }
+
+    pub(crate) fn embedded(&self) -> bool {
+        self.video.is_some()
     }
 
     // ------------------------------------------------------------------ state
 
-    fn notify_error(&mut self, msg: impl Into<String>, cx: &mut Context<Self>) {
+    pub(crate) fn notify_error(&mut self, msg: impl Into<String>, cx: &mut Context<Self>) {
         self.error = Some(msg.into());
         self.busy = None;
         cx.notify();
     }
 
-    fn reload(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
         let libs = self.svc.libraries();
-        let media = self.svc.media();
+        let entries = self.svc.library_entries();
         cx.spawn(async move |this, cx| {
             let libs = libs.await;
-            let media = media.await;
+            let entries = entries.await;
             this.update(cx, |this, cx| {
-                this.busy = None;
-                match (libs, media) {
-                    (Ok(l), Ok(m)) => {
+                if !this.matching {
+                    this.busy = None;
+                }
+                match (libs, entries) {
+                    (Ok(l), Ok(e)) => {
                         this.libraries = l;
-                        this.media = m;
+                        this.entries = e;
+                        if !this.startup_scanned {
+                            this.startup_scanned = true;
+                            for lib in this.libraries.clone() {
+                                this.scan_library(lib, cx);
+                            }
+                        }
+                        this.maybe_match(cx);
                     }
                     (Err(e), _) | (_, Err(e)) => this.error = Some(e),
                 }
@@ -235,11 +376,72 @@ impl MediaHubView {
         .detach();
     }
 
-    fn navigate(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+    /// Match new files against TMDB once per change (posters, details)
+    fn maybe_match(&mut self, cx: &mut Context<Self>) {
+        let cfg = self.svc.config();
+        if self.matching || self.match_attempted || !cfg.auto_match || !self.svc.has_tmdb() {
+            return;
+        }
+        if self.entries.iter().any(|e| e.link.is_none() && !is_audio(&e.item)) {
+            self.match_library(false, cx);
+        }
+    }
+
+    pub(crate) fn match_library(&mut self, force: bool, cx: &mut Context<Self>) {
+        if self.matching {
+            return;
+        }
+        self.matching = true;
+        self.match_attempted = true;
+        self.busy = Some("Fetching posters & details from TMDB…".into());
+        cx.notify();
+        let fut = self.svc.match_library(force);
+        cx.spawn(async move |this, cx| {
+            let res = fut.await;
+            this.update(cx, |this, cx| {
+                this.matching = false;
+                this.busy = None;
+                match res {
+                    Ok((m, u)) => {
+                        this.status = Some(format!("TMDB: {m} matched{}", if u > 0 { format!(", {u} not found") } else { String::new() }))
+                    }
+                    Err(e) => this.error = Some(e),
+                }
+                this.reload(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn navigate(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        if page == Page::Player && self.now.is_none() {
+            return;
+        }
+        if page != self.page && self.page != Page::Player && self.page != Page::Details {
+            self.back_page = self.page;
+        }
+        if page != Page::Player && self.theater {
+            self.set_theater(false, window, cx);
+        }
         self.page = page;
         window.focus(&self.focus_handle, cx);
         cx.notify();
     }
+
+    pub(crate) fn set_home_layout(&mut self, layout: HomeLayout, cx: &mut Context<Self>) {
+        let mut cfg = self.svc.config();
+        cfg.home_layout = layout;
+        if let Err(e) = self.svc.save_config(cfg) {
+            self.error = Some(e);
+        }
+        if layout == HomeLayout::Discover && self.trending.is_empty() {
+            self.load_trending(cx);
+        }
+        cx.notify();
+    }
+
+    // ---------------------------------------------------------------- library
 
     fn add_library(&mut self, path: String, cx: &mut Context<Self>) {
         if path.trim().is_empty() {
@@ -256,6 +458,7 @@ impl MediaHubView {
                 match res {
                     Ok((lib, n)) => {
                         this.status = Some(format!("Added “{}” · {} items", lib.name, n));
+                        this.match_attempted = false;
                         this.reload(cx);
                     }
                     Err(e) => this.error = Some(e),
@@ -267,13 +470,13 @@ impl MediaHubView {
         .detach();
     }
 
-    fn add_library_from_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn add_library_from_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let path = self.path_input.read(cx).value().to_string();
         self.path_input.update(cx, |s, cx| s.set_value("", window, cx));
         self.add_library(path, cx);
     }
 
-    fn browse_folder(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn browse_folder(&mut self, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -288,19 +491,15 @@ impl MediaHubView {
                         this.add_library(p.to_string_lossy().to_string(), cx);
                     }
                 }
-                Ok(Ok(None)) => {}
-                Ok(Err(e)) => this.notify_error(
-                    format!("Folder picker unavailable ({e}). Type the path instead."),
-                    cx,
-                ),
-                Err(_) => {}
+                Ok(Err(e)) => this.notify_error(format!("Folder picker unavailable ({e}). Type the path instead."), cx),
+                _ => {}
             })
             .ok();
         })
         .detach();
     }
 
-    fn remove_library(&mut self, id: Uuid, cx: &mut Context<Self>) {
+    pub(crate) fn remove_library(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let fut = self.svc.remove_library(id);
         cx.spawn(async move |this, cx| {
             let res = fut.await;
@@ -316,7 +515,7 @@ impl MediaHubView {
         .detach();
     }
 
-    fn scan_library(&mut self, lib: Library, cx: &mut Context<Self>) {
+    pub(crate) fn scan_library(&mut self, lib: Library, cx: &mut Context<Self>) {
         self.busy = Some(format!("Scanning {}…", lib.name));
         cx.notify();
         let fut = self.svc.scan_library(&lib);
@@ -328,6 +527,7 @@ impl MediaHubView {
                     Ok(n) => this.status = Some(format!("Scan of “{}” complete · {} new", lib.name, n)),
                     Err(e) => this.error = Some(e),
                 }
+                this.match_attempted = false;
                 this.reload(cx);
             })
             .ok();
@@ -337,10 +537,10 @@ impl MediaHubView {
 
     fn save_progress(&mut self, update: Option<ProgressUpdate>, cx: &mut Context<Self>) {
         let Some(update) = update else { return };
-        // Mirror locally so cards and resume reflect it immediately
-        if let Some(item) = self.media.iter_mut().find(|m| m.id == update.media_id) {
-            item.watch_progress = update.position;
-            item.watched |= update.watched;
+        if let Some(e) = self.entries.iter_mut().find(|e| e.item.id == update.media_id) {
+            e.item.watch_progress = update.position;
+            e.item.watched |= update.watched;
+            e.item.updated_at = chrono_now();
         }
         let fut = self.svc.save_progress(update);
         cx.spawn(async move |_, _| {
@@ -351,53 +551,116 @@ impl MediaHubView {
         .detach();
     }
 
+    /// Library entries matching the filter box
+    pub(crate) fn filtered_entries(&self, cx: &App) -> Vec<&LibraryEntry> {
+        let filter = self.filter_input.read(cx).value().to_lowercase();
+        self.entries
+            .iter()
+            .filter(|e| {
+                filter.is_empty()
+                    || e.display_title().to_lowercase().contains(&filter)
+                    || e.item.file_name.to_lowercase().contains(&filter)
+            })
+            .collect()
+    }
+
+    pub(crate) fn entry(&self, id: Uuid) -> Option<&LibraryEntry> {
+        self.entries.iter().find(|e| e.item.id == id)
+    }
+
     // --------------------------------------------------------------- playback
 
-    fn play_item(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = self.media.iter().find(|m| m.id == id).cloned() else { return };
-        let previous = self.now.as_mut().and_then(|n| n.progress(false));
-        self.save_progress(previous, cx);
-        match self.player.play_at_position(std::path::Path::new(&item.file_path), resume_position(item.watch_progress)) {
-            Ok(()) => {
-                self.error = None;
-                self.status = Some(format!("Playing {}", item.title));
-                self.now = Some(NowPlaying::new(item.title.clone(), Some(id), self.volume));
+    /// End the current session's bookkeeping (progress + Trakt stop)
+    fn finish_session(&mut self, cx: &mut Context<Self>) {
+        if let Some(mut n) = self.now.take() {
+            if !self.eof_handled {
+                let update = n.progress(false);
+                self.save_progress(update, cx);
             }
-            Err(e) => self.error = Some(format!("Playback error: {e:#}")),
+            if let Some((item, action, pct)) = n.scrobble_stop() {
+                self.svc.trakt_scrobble(action, item, pct);
+            }
+        }
+        self.now_entry = None;
+        self.now_source = None;
+        self.autoplay = None;
+        self.eof_handled = false;
+        self.thumb = None;
+        self.hover_seek = None;
+    }
+
+    fn after_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.snap = PlaybackSnapshot::default();
+        if self.embedded() || self.page == Page::Player {
+            self.navigate(Page::Player, window, cx);
         }
         window.focus(&self.focus_handle, cx);
         cx.notify();
     }
 
-    fn play_url(&mut self, url: String, title: String, cx: &mut Context<Self>) {
-        let previous = self.now.as_mut().and_then(|n| n.progress(false));
-        self.save_progress(previous, cx);
-        match self.player.play_url(&url) {
+    pub(crate) fn play_item(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.entry(id).cloned() else { return };
+        self.finish_session(cx);
+        let path = std::path::Path::new(&entry.item.file_path);
+        match self.player.play_at_position(path, resume_position(entry.item.watch_progress)) {
             Ok(()) => {
-                self.status = Some(format!("Streaming {title}"));
-                self.now = Some(NowPlaying::new(title, None, self.volume));
+                self.error = None;
+                let title = match entry.subtitle().filter(|_| entry.kind() == Some(TitleKind::Tv)) {
+                    Some(s) => format!("{} · {s}", entry.display_title()),
+                    None => entry.display_title(),
+                };
+                self.status = Some(format!("Playing {title}"));
+                self.now = Some(NowPlaying::new(title, Some(id), self.volume).with_trakt(entry.trakt_item()));
+                self.now_source = Some(entry.item.file_path.clone());
+                self.now_entry = Some(entry);
+                self.after_start(window, cx);
             }
             Err(e) => self.error = Some(format!("Playback error: {e:#}")),
         }
         cx.notify();
     }
 
-    fn toggle_pause(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn play_url(&mut self, url: String, title: String, trakt: Option<TraktItem>, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_session(cx);
+        match self.player.play_url(&url) {
+            Ok(()) => {
+                self.status = Some(format!("Streaming {title}"));
+                self.now = Some(NowPlaying::new(title, None, self.volume).with_trakt(trakt));
+                self.now_source = Some(url);
+                self.after_start(window, cx);
+            }
+            Err(e) => self.error = Some(format!("Playback error: {e:#}")),
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_pause(&mut self, cx: &mut Context<Self>) {
         if let Some(n) = self.now.as_mut() {
             let _ = self.player.toggle_pause();
             n.paused = !n.paused;
+            self.snap.paused = n.paused;
             cx.notify();
         }
     }
 
-    fn seek_relative(&mut self, secs: f64, cx: &mut Context<Self>) {
+    pub(crate) fn seek_relative(&mut self, secs: f64, cx: &mut Context<Self>) {
         if self.now.is_some() {
             let _ = self.player.seek_relative(secs);
             cx.notify();
         }
     }
 
-    fn set_volume(&mut self, v: f64, persist: bool, cx: &mut Context<Self>) {
+    pub(crate) fn seek_to(&mut self, secs: f64, cx: &mut Context<Self>) {
+        if let Some(n) = self.now.as_mut() {
+            let _ = self.player.seek(secs);
+            n.position = secs;
+            self.snap.position = secs;
+            self.autoplay = None;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn set_volume(&mut self, v: f64, persist: bool, cx: &mut Context<Self>) {
         self.volume = v.clamp(0.0, 130.0);
         let _ = self.player.set_volume(self.volume);
         if let Some(n) = self.now.as_mut() {
@@ -411,74 +674,372 @@ impl MediaHubView {
         cx.notify();
     }
 
-    fn nudge_volume(&mut self, delta: f64, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn nudge_volume(&mut self, delta: f64, window: &mut Window, cx: &mut Context<Self>) {
         let v = (self.volume + delta).clamp(0.0, 130.0);
         self.volume_slider.update(cx, |s, cx| s.set_value(v as f32, window, cx));
         self.set_volume(v, true, cx);
     }
 
-    fn stop(&mut self, cx: &mut Context<Self>) {
-        if let Some(mut n) = self.now.take() {
-            let update = n.progress(false);
-            self.save_progress(update, cx);
-            self.status = Some(format!("Stopped {}", n.title));
-        }
-        let _ = self.player.stop();
+    pub(crate) fn set_speed(&mut self, speed: f64, cx: &mut Context<Self>) {
+        let _ = self.player.set_speed(speed);
+        let _ = self.player.show_text(&format!("Speed {speed:.2}×"));
+        self.snap.speed = speed;
         cx.notify();
     }
 
-    fn on_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn nudge_speed(&mut self, up: bool, cx: &mut Context<Self>) {
+        const STEPS: [f64; 9] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0];
+        let cur = if self.snap.speed > 0.0 { self.snap.speed } else { 1.0 };
+        let next = if up {
+            STEPS.iter().copied().find(|s| *s > cur + 0.01).unwrap_or(3.0)
+        } else {
+            STEPS.iter().rev().copied().find(|s| *s < cur - 0.01).unwrap_or(0.25)
+        };
+        self.set_speed(next, cx);
+    }
+
+    pub(crate) fn frame_step(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let _ = self.player.frame_step(forward);
+        cx.notify();
+    }
+
+    pub(crate) fn step_chapter(&mut self, delta: i64, cx: &mut Context<Self>) {
+        let _ = self.player.step_chapter(delta);
+        cx.notify();
+    }
+
+    pub(crate) fn go_chapter(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let _ = self.player.set_chapter(idx as i64);
+        cx.notify();
+    }
+
+    /// Current chapter is an intro/recap: (button label, seek target)
+    pub(crate) fn skip_target(&self) -> Option<(&'static str, f64)> {
+        let idx = self.snap.chapter? as usize;
+        let ch = self.snap.chapters.get(idx)?;
+        let t = ch.title.to_lowercase();
+        let is = |words: &[&str]| words.iter().any(|w| t == *w || t.contains(w));
+        let label = if is(&["intro", "opening", "opening credits", "title sequence"]) || t == "op" {
+            "Skip intro"
+        } else if is(&["recap", "previously"]) {
+            "Skip recap"
+        } else if is(&["credits", "ending", "outro", "end credits"]) || t == "ed" {
+            "Skip credits"
+        } else {
+            return None;
+        };
+        let target = self.snap.chapters.get(idx + 1).map(|c| c.time).or(self.snap.duration.map(|d| (d - 1.0).max(0.0)))?;
+        Some((label, target))
+    }
+
+    pub(crate) fn skip_segment(&mut self, cx: &mut Context<Self>) {
+        if let Some((_, target)) = self.skip_target() {
+            self.seek_to(target, cx);
+        }
+    }
+
+    pub(crate) fn select_track(&mut self, kind: rmh_app::TrackKind, id: Option<i64>, cx: &mut Context<Self>) {
+        let _ = self.player.set_track(kind, id);
+        for t in self.snap.tracks.iter_mut().filter(|t| t.kind == kind) {
+            t.selected = Some(t.id) == id;
+        }
+        cx.notify();
+    }
+
+    /// Keyboard: step to the next audio / subtitle track (subtitles wrap through "off")
+    pub(crate) fn cycle_track(&mut self, kind: rmh_app::TrackKind, cx: &mut Context<Self>) {
+        let ids: Vec<i64> = self.snap.tracks.iter().filter(|t| t.kind == kind).map(|t| t.id).collect();
+        if ids.is_empty() {
+            return;
+        }
+        let cur = self.snap.tracks.iter().find(|t| t.kind == kind && t.selected).map(|t| t.id);
+        let mut options: Vec<Option<i64>> = ids.into_iter().map(Some).collect();
+        if kind == rmh_app::TrackKind::Sub {
+            options.push(None);
+        }
+        let i = options.iter().position(|o| *o == cur).map(|i| (i + 1) % options.len()).unwrap_or(0);
+        let next = options[i];
+        self.side_tab = if kind == rmh_app::TrackKind::Sub { SideTab::Subtitles } else { SideTab::Audio };
+        let label = next
+            .and_then(|id| self.snap.tracks.iter().find(|t| t.kind == kind && t.id == id))
+            .map(|t| t.label())
+            .unwrap_or_else(|| "Off".into());
+        let what = if kind == rmh_app::TrackKind::Sub { "Subtitles" } else { "Audio" };
+        let _ = self.player.show_text(&format!("{what}: {label}"));
+        self.select_track(kind, next, cx);
+    }
+
+    pub(crate) fn cycle_side_tab(&mut self, cx: &mut Context<Self>) {
+        self.side_tab = match self.side_tab {
+            SideTab::Chapters => SideTab::Audio,
+            SideTab::Audio => SideTab::Subtitles,
+            SideTab::Subtitles => SideTab::Speed,
+            SideTab::Speed => SideTab::Chapters,
+        };
+        cx.notify();
+    }
+
+    pub(crate) fn load_subtitle_file(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Load subtitles".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                this.update(cx, |this, cx| {
+                    if let Some(p) = paths.first() {
+                        let _ = this.player.add_subtitle(&p.to_string_lossy());
+                        this.status = Some("Subtitles loaded".into());
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn set_theater(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.theater != on {
+            self.theater = on;
+            if window.is_fullscreen() != on {
+                window.toggle_fullscreen();
+            }
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(n) = &self.now {
+            self.status = Some(format!("Stopped {}", n.title));
+        }
+        self.finish_session(cx);
+        let _ = self.player.stop();
+        if let Some(v) = &self.video {
+            v.hide();
+        }
+        if self.page == Page::Player {
+            let back = self.back_page;
+            self.navigate(back, window, cx);
+        }
+        self.set_theater(false, window, cx);
+        self.reload(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn next_local_episode(&self) -> Option<LibraryEntry> {
+        let cur = self.now_entry.as_ref()?;
+        next_episode(&self.entries, cur).cloned()
+    }
+
+    /// Seek-bar hover: remember the time and fetch a preview frame
+    pub(crate) fn hover_seek_at(&mut self, x: Pixels, cx: &mut Context<Self>) {
+        let b = self.seek_bounds.get();
+        let (Some(d), w) = (self.snap.duration.filter(|d| *d > 0.0), f32::from(b.size.width)) else { return };
+        if w <= 0.0 {
+            return;
+        }
+        let frac = ((f32::from(x) - f32::from(b.origin.x)) / w).clamp(0.0, 1.0) as f64;
+        let secs = frac * d;
+        self.hover_seek = Some(secs);
+        self.request_thumb(secs, cx);
+        cx.notify();
+    }
+
+    fn request_thumb(&mut self, secs: f64, cx: &mut Context<Self>) {
+        let bucket = (secs / 5.0).floor() as u64 * 5;
+        if self.thumb.as_ref().is_some_and(|(b, _)| *b == bucket) || self.thumb_pending {
+            return;
+        }
+        let Some(src) = self.now_source.clone() else { return };
+        self.thumb_pending = true;
+        let fut = self.svc.thumbnail(src, secs);
+        cx.spawn(async move |this, cx| {
+            let res = fut.await;
+            this.update(cx, |this, cx| {
+                this.thumb_pending = false;
+                if let Ok(path) = res {
+                    this.thumb = Some((bucket, path));
+                }
+                // The pointer may have moved on meanwhile
+                if let Some(h) = this.hover_seek {
+                    if (h / 5.0).floor() as u64 * 5 != bucket {
+                        this.request_thumb(h, cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn click_seek_at(&mut self, x: Pixels, cx: &mut Context<Self>) {
+        let b = self.seek_bounds.get();
+        let w = f32::from(b.size.width);
+        if let (Some(d), true) = (self.snap.duration.filter(|d| *d > 0.0), w > 0.0) {
+            let frac = ((f32::from(x) - f32::from(b.origin.x)) / w).clamp(0.0, 1.0) as f64;
+            self.seek_to(frac * d, cx);
+        }
+    }
+
+    pub(crate) fn on_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(now) = self.now.as_mut() else { return };
         let snap = self.player.snapshot();
-        match now.tick(&snap) {
+        let outcome = now.tick(&snap);
+        let scrobble = now.scrobble_update();
+        let fullscreen_changed = snap.fullscreen != self.snap.fullscreen;
+        self.snap = snap;
+        if let Some((item, action, pct)) = scrobble {
+            self.svc.trakt_scrobble(action, item, pct);
+        }
+        match outcome {
             TickOutcome::Continue => {}
             TickOutcome::Save(update) => self.save_progress(Some(update), cx),
             TickOutcome::Ended(update) => {
-                let title = now.title.clone();
-                self.now = None;
-                self.save_progress(update, cx);
+                let title = self.now.as_ref().map(|n| n.title.clone()).unwrap_or_default();
+                if !self.eof_handled {
+                    self.save_progress(update, cx);
+                }
+                self.eof_handled = true;
+                self.finish_session(cx);
+                if let Some(v) = &self.video {
+                    v.hide();
+                }
+                if self.page == Page::Player {
+                    let back = self.back_page;
+                    self.navigate(back, window, cx);
+                }
+                self.set_theater(false, window, cx);
                 self.status = Some(format!("Finished {title}"));
+                cx.notify();
+                return;
             }
             TickOutcome::Failed(err) => {
-                self.now = None;
+                self.finish_session(cx);
                 let _ = self.player.stop();
                 self.error = Some(err);
+                if let Some(v) = &self.video {
+                    v.hide();
+                }
+                cx.notify();
+                return;
             }
         }
-        if let Some(n) = &self.now {
-            if !self.seek_dragging {
-                let frac = n.duration.filter(|d| *d > 0.0).map(|d| (n.position / d).clamp(0.0, 1.0)).unwrap_or(0.0);
-                self.seek_slider.update(cx, |s, cx| s.set_value(frac as f32 * SEEK_STEPS, window, cx));
+        // mpv's own fullscreen (double-click / F in the video) drives theater mode
+        if fullscreen_changed && self.embedded() {
+            let fs = self.snap.fullscreen;
+            if self.page != Page::Player && fs {
+                self.navigate(Page::Player, window, cx);
+            }
+            self.set_theater(fs, window, cx);
+        }
+        // End of file (mpv keeps the last frame): mark watched, maybe autoplay
+        if self.snap.eof && !self.eof_handled {
+            self.eof_handled = true;
+            if let Some(n) = self.now.as_mut() {
+                let update = n.progress(true);
+                let stop = n.scrobble_stop();
+                self.save_progress(update, cx);
+                if let Some((item, action, _)) = stop {
+                    self.svc.trakt_scrobble(action, item, 100.0);
+                }
+            }
+            if self.svc.config().autoplay_next {
+                if let Some(next) = self.next_local_episode() {
+                    self.autoplay = Some((Instant::now() + Duration::from_secs(10), next.item.id));
+                    let _ = self.player.show_text(&format!("Up next: {} – {}", next.display_title(), next.subtitle().unwrap_or_default()));
+                }
+            }
+        } else if !self.snap.eof && self.eof_handled && self.snap.position > 1.0 {
+            // user seeked back from the end
+            if let Some(n) = self.now.as_ref() {
+                if n.duration.is_some_and(|d| d - n.position > 5.0) {
+                    self.eof_handled = false;
+                    self.autoplay = None;
+                }
+            }
+        }
+        if let Some((at, id)) = self.autoplay {
+            if Instant::now() >= at {
+                self.autoplay = None;
+                self.play_item(id, window, cx);
             }
         }
         cx.notify();
+    }
+
+    pub(crate) fn play_next_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let next = self.autoplay.take().map(|(_, id)| id).or_else(|| self.next_local_episode().map(|e| e.item.id));
+        if let Some(id) = next {
+            self.play_item(id, window, cx);
+        }
     }
 
     // --------------------------------------------------------------- discover
 
-    fn search_discover(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn load_trending(&mut self, cx: &mut Context<Self>) {
+        if !self.svc.has_tmdb() {
+            return;
+        }
+        let fut = self.svc.trending();
+        cx.spawn(async move |this, cx| {
+            let res = fut.await;
+            this.update(cx, |this, cx| {
+                match res {
+                    Ok(t) => {
+                        this.trending = t;
+                        this.load_hero(cx);
+                    }
+                    Err(e) => tracing::warn!("Trending failed: {e}"),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn load_hero(&mut self, cx: &mut Context<Self>) {
+        let Some(top) = self.trending.first() else { return };
+        let fut = self.svc.title_details(top.title.kind, top.title.tmdb_id);
+        cx.spawn(async move |this, cx| {
+            if let Ok((_, backdrop)) = fut.await {
+                this.update(cx, |this, cx| {
+                    this.hero_backdrop = backdrop;
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn search_discover(&mut self, cx: &mut Context<Self>) {
         let query = self.discover_input.read(cx).value().trim().to_string();
         if query.is_empty() {
+            self.results.clear();
+            cx.notify();
+            return;
+        }
+        let is_imdb = query.starts_with("tt") && query[2..].chars().all(|c| c.is_ascii_digit());
+        if is_imdb && !self.svc.has_tmdb() {
+            self.load_streams(query.clone(), None, StreamContext { label: query, trakt: None }, cx);
             return;
         }
         self.searching = true;
         self.error = None;
-        self.streams.clear();
-        self.selected_movie = None;
-        if query.starts_with("tt") && query[2..].chars().all(|c| c.is_ascii_digit()) {
-            self.movies.clear();
-            self.load_streams(query, cx);
-            return;
-        }
-        let fut = self.svc.search_movies(query);
+        let fut = self.svc.search_titles(query);
         cx.spawn(async move |this, cx| {
             let res = fut.await;
             this.update(cx, |this, cx| {
                 this.searching = false;
                 match res {
-                    Ok(m) => {
-                        this.status = Some(format!("{} movies found", m.len()));
-                        this.movies = m;
+                    Ok(r) => {
+                        this.status = Some(format!("{} titles found", r.len()));
+                        this.results = r;
                     }
                     Err(e) => this.error = Some(e),
                 }
@@ -490,24 +1051,137 @@ impl MediaHubView {
         cx.notify();
     }
 
-    fn select_movie(&mut self, idx: usize, cx: &mut Context<Self>) {
-        let Some(movie) = self.movies.get(idx) else { return };
-        let Some(imdb) = movie.imdb_id.clone() else {
-            self.notify_error("No IMDb id for this title, can't look up streams", cx);
-            return;
-        };
-        self.selected_movie = Some(idx);
-        self.searching = true;
-        self.streams.clear();
-        self.load_streams(imdb, cx);
+    /// Open the details page for a TMDB title
+    pub(crate) fn open_title(&mut self, card: &TitleCard, local: Option<Uuid>, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_details(
+            DetailsState {
+                kind: Some(card.title.kind),
+                tmdb_id: Some(card.title.tmdb_id),
+                local,
+                name: card.title.name.clone(),
+                poster: card.poster.clone(),
+                details: None,
+                backdrop: None,
+                loading: true,
+                season: None,
+                episodes: vec![],
+            },
+            window,
+            cx,
+        );
     }
 
-    fn load_streams(&mut self, imdb: String, cx: &mut Context<Self>) {
-        let fut = self.svc.search_streams(imdb);
+    /// Open details for a library entry (or play it if we know nothing more)
+    pub(crate) fn open_entry(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(e) = self.entry(id).cloned() else { return };
+        let (Some(kind), Some(tmdb)) = (e.kind(), e.link.as_ref().and_then(|l| l.tmdb_id)) else {
+            self.play_item(id, window, cx);
+            return;
+        };
+        let season = e.link.as_ref().and_then(|l| l.season).map(|s| s as u32);
+        self.open_details(
+            DetailsState {
+                kind: Some(kind),
+                tmdb_id: Some(tmdb as i32),
+                local: (kind == TitleKind::Movie).then_some(id),
+                name: e.display_title(),
+                poster: e.poster(),
+                details: None,
+                backdrop: None,
+                loading: true,
+                season,
+                episodes: vec![],
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn open_details(&mut self, state: DetailsState, window: &mut Window, cx: &mut Context<Self>) {
+        self.streams.clear();
+        self.stream_ctx = None;
+        let (kind, id) = (state.kind, state.tmdb_id);
+        self.details = Some(state);
+        self.navigate(Page::Details, window, cx);
+        let (Some(kind), Some(id)) = (kind, id) else { return };
+        if !self.svc.has_tmdb() {
+            if let Some(d) = self.details.as_mut() {
+                d.loading = false;
+            }
+            return;
+        }
+        let fut = self.svc.title_details(kind, id);
         cx.spawn(async move |this, cx| {
             let res = fut.await;
             this.update(cx, |this, cx| {
-                this.searching = false;
+                let mut load_season = None;
+                if let Some(d) = this.details.as_mut().filter(|d| d.tmdb_id == Some(id)) {
+                    d.loading = false;
+                    match res {
+                        Ok((det, backdrop)) => {
+                            if kind == TitleKind::Tv {
+                                let s = d.season.or_else(|| det.seasons.iter().find(|s| s.number > 0).map(|s| s.number));
+                                d.season = s;
+                                load_season = s;
+                            }
+                            d.details = Some(det);
+                            d.backdrop = backdrop;
+                        }
+                        Err(e) => this.error = Some(e),
+                    }
+                }
+                if let Some(s) = load_season {
+                    this.select_season(s, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn select_season(&mut self, season: u32, cx: &mut Context<Self>) {
+        let Some(d) = self.details.as_mut() else { return };
+        let Some(show) = d.tmdb_id else { return };
+        d.season = Some(season);
+        d.episodes.clear();
+        let fut = self.svc.season_episodes(show, season);
+        cx.spawn(async move |this, cx| {
+            let res = fut.await;
+            this.update(cx, |this, cx| {
+                if let Some(d) = this.details.as_mut().filter(|d| d.tmdb_id == Some(show) && d.season == Some(season)) {
+                    match res {
+                        Ok(eps) => d.episodes = eps,
+                        Err(e) => this.error = Some(e),
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Local file for an episode of the show on the details page
+    pub(crate) fn local_episode(&self, show: i32, season: u32, episode: u32) -> Option<&LibraryEntry> {
+        self.entries.iter().find(|e| {
+            e.link.as_ref().is_some_and(|l| {
+                l.kind == "tv" && l.tmdb_id == Some(show as i64) && l.season == Some(season as i64) && l.episode == Some(episode as i64)
+            })
+        })
+    }
+
+    pub(crate) fn load_streams(&mut self, imdb: String, episode: Option<(u32, u32)>, ctx: StreamContext, cx: &mut Context<Self>) {
+        self.streams_loading = true;
+        self.streams.clear();
+        self.stream_ctx = Some(ctx);
+        self.error = None;
+        let fut = self.svc.search_streams_for(imdb, episode);
+        cx.spawn(async move |this, cx| {
+            let res = fut.await;
+            this.update(cx, |this, cx| {
+                this.streams_loading = false;
                 match res {
                     Ok(s) => {
                         this.status = Some(format!("{} streams found", s.len()));
@@ -523,17 +1197,21 @@ impl MediaHubView {
         cx.notify();
     }
 
-    fn play_stream(&mut self, idx: usize, cx: &mut Context<Self>) {
+    pub(crate) fn play_stream(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(hit) = self.streams.get(idx).cloned() else { return };
+        let ctx = self.stream_ctx.clone();
         self.busy = Some(format!("Preparing stream: {}", hit.title));
         cx.notify();
         let fut = self.svc.resolve_stream(&hit);
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let res = fut.await;
-            this.update(cx, |this, cx| {
+            this.update_in(cx, |this, window, cx| {
                 this.busy = None;
                 match res {
-                    Ok(r) => this.play_url(r.url, r.title, cx),
+                    Ok(r) => {
+                        let title = ctx.as_ref().map(|c| c.label.clone()).unwrap_or(r.title);
+                        this.play_url(r.url, title, ctx.and_then(|c| c.trakt), window, cx)
+                    }
                     Err(e) => this.notify_error(e, cx),
                 }
             })
@@ -542,25 +1220,187 @@ impl MediaHubView {
         .detach();
     }
 
+    // ------------------------------------------------------------------ trakt
+
+    pub(crate) fn refresh_trakt(&mut self, cx: &mut Context<Self>) {
+        let fut = self.svc.trakt_status();
+        cx.spawn(async move |this, cx| {
+            let res = fut.await;
+            this.update(cx, |this, cx| {
+                if let Ok(s) = res {
+                    let logged = s.logged_in;
+                    this.trakt = s;
+                    if logged {
+                        this.load_trakt_lists(cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn load_trakt_lists(&mut self, cx: &mut Context<Self>) {
+        let fut = self.svc.trakt_lists();
+        let svc = self.svc.clone();
+        cx.spawn(async move |this, cx| {
+            let Ok(lists) = fut.await else { return };
+            let ids: Vec<(TitleKind, i32)> = lists
+                .playback
+                .iter()
+                .chain(lists.watchlist.iter())
+                .filter_map(|e| {
+                    let kind = if e.movie.is_some() { TitleKind::Movie } else { TitleKind::Tv };
+                    Some((kind, e.tmdb_id()? as i32))
+                })
+                .take(24)
+                .collect();
+            let cards = if svc.has_tmdb() { svc.cards_for(ids).await.unwrap_or_default() } else { vec![] };
+            this.update(cx, |this, cx| {
+                this.trakt_lists = lists;
+                this.trakt_cards = cards;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn trakt_connect(&mut self, cx: &mut Context<Self>) {
+        self.save_settings(cx);
+        let begin = self.svc.trakt_begin_login();
+        let svc = self.svc.clone();
+        cx.spawn(async move |this, cx| {
+            let code = match begin.await {
+                Ok(c) => c,
+                Err(e) => {
+                    this.update(cx, |this, cx| this.notify_error(e, cx)).ok();
+                    return;
+                }
+            };
+            this.update(cx, |this, cx| {
+                this.trakt_code = Some(code.clone());
+                this.status = Some(format!("Enter {} at {}", code.user_code, code.verification_url));
+                cx.notify();
+            })
+            .ok();
+            let res = svc.trakt_finish_login(code).await;
+            this.update(cx, |this, cx| {
+                this.trakt_code = None;
+                match res {
+                    Ok(user) => {
+                        this.status = Some(format!("Connected to Trakt{}", user.map(|u| format!(" as {u}")).unwrap_or_default()));
+                        this.refresh_trakt(cx);
+                        this.trakt_sync(cx);
+                    }
+                    Err(e) => this.error = Some(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn trakt_disconnect(&mut self, cx: &mut Context<Self>) {
+        let fut = self.svc.trakt_logout();
+        cx.spawn(async move |this, cx| {
+            let _ = fut.await;
+            this.update(cx, |this, cx| {
+                this.trakt_lists = TraktLists::default();
+                this.trakt_cards.clear();
+                this.status = Some("Disconnected from Trakt".into());
+                this.refresh_trakt(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn trakt_sync(&mut self, cx: &mut Context<Self>) {
+        self.busy = Some("Syncing with Trakt…".into());
+        cx.notify();
+        let fut = self.svc.trakt_sync();
+        cx.spawn(async move |this, cx| {
+            let res = fut.await;
+            this.update(cx, |this, cx| {
+                this.busy = None;
+                match res {
+                    Ok(r) => this.status = Some(format!("Trakt sync: {} marked watched, {} sent", r.pulled, r.pushed)),
+                    Err(e) => this.error = Some(e),
+                }
+                this.reload(cx);
+                this.load_trakt_lists(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn trakt_watchlist_add(&mut self, kind: TitleKind, id: i32, cx: &mut Context<Self>) {
+        let fut = self.svc.trakt_add_to_watchlist(kind, id);
+        cx.spawn(async move |this, cx| {
+            let res = fut.await;
+            this.update(cx, |this, cx| {
+                match res {
+                    Ok(()) => {
+                        this.status = Some("Added to your Trakt watchlist".into());
+                        this.load_trakt_lists(cx);
+                    }
+                    Err(e) => this.error = Some(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     // --------------------------------------------------------------- settings
 
-    fn save_settings(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn save_settings(&mut self, cx: &mut Context<Self>) {
         let mut cfg = self.svc.config();
         let read = |e: &Entity<InputState>, cx: &Context<Self>| {
             let v = e.read(cx).value().trim().to_string();
             (!v.is_empty()).then_some(v)
         };
+        let had_tmdb = self.svc.has_tmdb();
         cfg.tmdb_api_key = read(&self.tmdb_input, cx);
         cfg.real_debrid_api_key = read(&self.rd_input, cx);
         cfg.mpv_path = read(&self.mpv_input, cx);
+        cfg.trakt_client_id = read(&self.trakt_id_input, cx);
+        cfg.trakt_client_secret = read(&self.trakt_secret_input, cx);
+        cfg.audio_lang = read(&self.alang_input, cx);
+        cfg.sub_lang = read(&self.slang_input, cx);
         let mpv = cfg.mpv_path();
         match self.svc.save_config(cfg) {
             Ok(()) => {
                 self.mpv_version = Player::mpv_version(&mpv);
-                let mut pc = self.player.get_config();
-                pc.mpv_path = mpv;
-                self.player.set_config(pc);
+                let wid = self.video.as_ref().map(|v| v.xid());
+                self.player.set_config(Self::player_config(&self.svc, wid, self.volume));
                 self.status = Some("Settings saved".into());
+                if !had_tmdb && self.svc.has_tmdb() {
+                    self.match_attempted = false;
+                    self.load_trending(cx);
+                    self.reload(cx);
+                }
+                self.refresh_trakt(cx);
+            }
+            Err(e) => self.error = Some(e),
+        }
+        cx.notify();
+    }
+
+    /// Flip a boolean / enum setting and persist it
+    pub(crate) fn update_config(&mut self, f: impl FnOnce(&mut rmh_app::AppConfig), restart_hint: bool, cx: &mut Context<Self>) {
+        let mut cfg = self.svc.config();
+        f(&mut cfg);
+        match self.svc.save_config(cfg) {
+            Ok(()) => {
+                let wid = self.video.as_ref().map(|v| v.xid());
+                self.player.set_config(Self::player_config(&self.svc, wid, self.volume));
+                self.status = Some(if restart_hint { "Saved, restart RustMediaHub to apply" } else { "Saved" }.into());
             }
             Err(e) => self.error = Some(e),
         }
@@ -569,881 +1409,113 @@ impl MediaHubView {
 
     // -------------------------------------------------------------- keyboard
 
-    fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
         if ks.modifiers.control {
             let page = match ks.key.as_str() {
                 "1" => Some(Page::Home),
                 "2" => Some(Page::Library),
                 "3" => Some(Page::Discover),
-                "," | "4" => Some(Page::Settings),
+                "4" | "," => Some(Page::Settings),
+                "5" => Some(Page::Player),
                 _ => None,
             };
             if let Some(p) = page {
                 self.navigate(p, window, cx);
                 cx.stop_propagation();
+                return;
+            }
+            match ks.key.as_str() {
+                // quick toggle between the three home layouts
+                "l" => {
+                    let cur = self.svc.config().home_layout;
+                    let all = HomeLayout::ALL;
+                    let i = all.iter().position(|l| *l == cur).unwrap_or(0);
+                    self.set_home_layout(all[(i + 1) % all.len()], cx);
+                    if self.page != Page::Home {
+                        self.navigate(Page::Home, window, cx);
+                    }
+                    cx.stop_propagation();
+                }
+                // details for what's playing / the top Continue Watching item
+                "i" => {
+                    if let Some(id) = self.now_entry.as_ref().map(|e| e.item.id).or_else(|| self.resume_candidate()) {
+                        self.open_entry(id, window, cx);
+                        cx.stop_propagation();
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        // Enter on Home / Library resumes the top Continue Watching (or Up Next) item
+        if ks.key == "enter" && matches!(self.page, Page::Home | Page::Library) && self.focus_handle.is_focused(window) {
+            if let Some(id) = self.resume_candidate() {
+                self.play_item(id, window, cx);
+                cx.stop_propagation();
             }
             return;
         }
         if ks.key == "escape" {
+            if self.theater {
+                self.set_theater(false, window, cx);
+            }
             window.focus(&self.focus_handle, cx);
             return;
         }
-        // Media keys only when no text field has focus
         if !self.focus_handle.is_focused(window) || self.now.is_none() {
             return;
         }
+        let shift = ks.modifiers.shift;
         match ks.key.as_str() {
-            "space" => self.toggle_pause(cx),
-            "left" => self.seek_relative(-10.0, cx),
-            "right" => self.seek_relative(10.0, cx),
+            "space" | "k" => self.toggle_pause(cx),
+            "left" => self.seek_relative(if shift { -60.0 } else { -10.0 }, cx),
+            "right" => self.seek_relative(if shift { 60.0 } else { 10.0 }, cx),
             "up" => self.nudge_volume(5.0, window, cx),
             "down" => self.nudge_volume(-5.0, window, cx),
-            "s" => self.stop(cx),
+            "," => self.frame_step(false, cx),
+            "." => self.frame_step(true, cx),
+            "[" => self.nudge_speed(false, cx),
+            "]" => self.nudge_speed(true, cx),
+            "backspace" => self.set_speed(1.0, cx),
+            // same as mpv's default bindings: PgUp = next chapter, PgDn = previous
+            "pageup" => self.step_chapter(1, cx),
+            "pagedown" => self.step_chapter(-1, cx),
+            "i" => self.skip_segment(cx),
+            "a" => self.cycle_track(rmh_app::TrackKind::Audio, cx),
+            "j" => self.cycle_track(rmh_app::TrackKind::Sub, cx),
+            "t" => self.cycle_side_tab(cx),
+            "n" => self.play_next_now(window, cx),
+            "f" => {
+                if self.page != Page::Player {
+                    self.navigate(Page::Player, window, cx);
+                }
+                let on = !self.theater;
+                self.set_theater(on, window, cx);
+            }
+            "m" => {
+                let muted = !self.snap.muted;
+                let _ = self.player.set_muted(muted);
+                self.snap.muted = muted;
+            }
+            "s" => self.stop(window, cx),
             _ => return,
         }
         cx.stop_propagation();
     }
+}
 
-    // ------------------------------------------------------------------- view
-
-    fn sidebar(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut nav = div().flex().flex_col().gap_1();
-        for page in Page::ALL {
-            let selected = self.page == page;
-            nav = nav.child(
-                div()
-                    .id(format!("nav-{}", page.label()))
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .px_3()
-                    .py_2()
-                    .rounded_lg()
-                    .cursor_pointer()
-                    .bg(rgb(if selected { p.active } else { p.sidebar }))
-                    .text_color(rgb(if selected { p.text } else { p.muted }))
-                    .hover(|s| s.bg(rgb(p.border_soft)).text_color(rgb(p.text)))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.navigate(page, window, cx)))
-                    .child(
-                        div()
-                            .size(px(28.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .bg(rgb(if selected { p.accent_soft } else { p.surface_raised }))
-                            .text_color(rgb(if selected { p.accent } else { p.muted }))
-                            .child(page.glyph()),
-                    )
-                    .child(div().flex_1().text_sm().child(page.label()))
-                    .when(selected, |d| d.child(div().w(px(3.0)).h(px(14.0)).rounded_full().bg(rgb(p.accent)))),
-            );
-        }
-
-        let watched = self.media.iter().filter(|m| m.watched).count();
-        div()
-            .w(px(232.0))
-            .flex_none()
-            .flex()
-            .flex_col()
-            .h_full()
-            .px_4()
-            .py_5()
-            .gap_6()
-            .bg(rgb(p.sidebar))
-            .border_r_1()
-            .border_color(rgb(p.border))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .px_2()
-                    .child(
-                        div()
-                            .size(px(36.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_lg()
-                            .bg(linear_gradient(
-                                135.0,
-                                linear_color_stop(rgb(p.accent), 0.0),
-                                linear_color_stop(rgb(0x4CC9F0), 1.0),
-                            ))
-                            .text_color(rgb(p.on_accent))
-                            .font_weight(FontWeight::BOLD)
-                            .child("▶"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("RustMediaHub"))
-                            .child(div().text_xs().text_color(rgb(p.muted)).child("Media center")),
-                    ),
-            )
-            .child(nav)
-            .child(div().flex_1())
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .p_3()
-                    .rounded_lg()
-                    .bg(rgb(p.surface))
-                    .border_1()
-                    .border_color(rgb(p.border_soft))
-                    .text_xs()
-                    .text_color(rgb(p.muted))
-                    .child(format!("{} items · {} libraries", self.media.len(), self.libraries.len()))
-                    .child(format!("{watched} watched"))
-                    .child(
-                        div()
-                            .text_color(rgb(if self.mpv_version.is_some() { p.good } else { p.danger }))
-                            .child(match &self.mpv_version {
-                                Some(v) => format!("● {v}"),
-                                None => "● mpv not found".to_string(),
-                            }),
-                    ),
-            )
-    }
-
-    fn top_bar(&self, p: Palette) -> impl IntoElement {
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .px_8()
-            .py_5()
-            .border_b_1()
-            .border_color(rgb(p.border_soft))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(div().text_2xl().font_weight(FontWeight::SEMIBOLD).child(self.page.label()))
-                    .child(div().text_sm().text_color(rgb(p.muted)).child(self.page.subtitle())),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_sm()
-                    .text_color(rgb(p.muted))
-                    .when_some(self.busy.clone(), |d, b| {
-                        d.child(div().size(px(8.0)).rounded_full().bg(rgb(p.warn))).child(b)
-                    })
-                    .when(self.busy.is_none(), |d| {
-                        d.when_some(self.status.clone(), |d, s| {
-                            d.child(div().size(px(8.0)).rounded_full().bg(rgb(p.good))).child(s)
-                        })
-                    }),
-            )
-    }
-
-    fn button(&self, id: impl Into<ElementId>, label: impl Into<SharedString>, primary: bool, p: Palette) -> Stateful<Div> {
-        let d = div()
-            .id(id.into())
-            .flex()
-            .items_center()
-            .justify_center()
-            .px_4()
-            .py_2()
-            .rounded_lg()
-            .text_sm()
-            .cursor_pointer()
-            .child(label.into());
-        if primary {
-            d.bg(rgb(p.accent))
-                .text_color(rgb(p.on_accent))
-                .font_weight(FontWeight::MEDIUM)
-                .hover(|s| s.opacity(0.9))
-        } else {
-            d.bg(rgb(p.surface_raised))
-                .border_1()
-                .border_color(rgb(p.border))
-                .text_color(rgb(p.text))
-                .hover(|s| s.border_color(rgb(p.accent)))
-        }
-    }
-
-    fn section_title(&self, title: impl Into<SharedString>, p: Palette) -> impl IntoElement {
-        div().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(p.text)).child(title.into())
-    }
-
-    fn add_library_row(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(div().w(px(380.0)).child(Input::new(&self.path_input).w_full()))
-            .child(
-                self.button("add-lib", "Add folder", true, p)
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.add_library_from_input(window, cx))),
-            )
-            .child(
-                self.button("browse-lib", "Browse…", false, p)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.browse_folder(cx))),
-            )
-    }
-
-    fn media_card(&self, item: &MediaItem, key: &str, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let id = item.id;
-        let (c1, c2) = tile_colors(&item.title);
-        let audio = is_audio(item);
-        let playing = self.now.as_ref().and_then(|n| n.media_id) == Some(id);
-        let progress = item
-            .runtime_minutes
-            .filter(|m| *m > 0)
-            .map(|m| (item.watch_progress as f32 / (m as f32 * 60.0)).clamp(0.0, 1.0));
-        div()
-            .id(format!("card-{key}-{id}"))
-            .w(px(176.0))
-            .flex()
-            .flex_col()
-            .gap_2()
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.play_item(id, window, cx)))
-            .child(
-                div()
-                    .relative()
-                    .h(px(250.0))
-                    .w_full()
-                    .rounded_xl()
-                    .overflow_hidden()
-                    .border_1()
-                    .border_color(rgb(if playing { p.accent } else { p.border_soft }))
-                    .bg(linear_gradient(160.0, linear_color_stop(rgb(c1), 0.0), linear_color_stop(rgb(c2), 1.0)))
-                    .hover(|s| s.border_color(rgb(p.accent)))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        div()
-                            .text_3xl()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(rgba(0xFFFFFFCC))
-                            .child(if audio { "♪".to_string() } else { initials(&item.title) }),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .top_2()
-                            .left_2()
-                            .px_2()
-                            .py(px(2.0))
-                            .rounded_md()
-                            .bg(rgba(0x00000088))
-                            .text_xs()
-                            .text_color(rgb(p.text))
-                            .child(if audio { "AUDIO" } else { "VIDEO" }),
-                    )
-                    .when(item.watched, |d| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .top_2()
-                                .right_2()
-                                .px_2()
-                                .py(px(2.0))
-                                .rounded_md()
-                                .bg(rgb(p.good))
-                                .text_xs()
-                                .text_color(rgb(0x062014))
-                                .child("✓ Watched"),
-                        )
-                    })
-                    .when(playing, |d| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .bottom_2()
-                                .left_2()
-                                .px_2()
-                                .py(px(2.0))
-                                .rounded_md()
-                                .bg(rgb(p.accent))
-                                .text_xs()
-                                .text_color(rgb(p.on_accent))
-                                .child("▶ Playing"),
-                        )
-                    })
-                    .when_some(progress.filter(|_| !item.watched && item.watch_progress > 0), |d, frac| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .bottom_0()
-                                .left_0()
-                                .w_full()
-                                .h(px(4.0))
-                                .bg(rgba(0xFFFFFF22))
-                                .child(div().h_full().w(relative(frac)).bg(rgb(p.accent))),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(div().text_sm().text_color(rgb(p.text)).truncate().child(item.title.clone()))
-                    .child(
-                        div().text_xs().text_color(rgb(p.muted)).child(if item.watch_progress > 0 && !item.watched {
-                            format!("Resume at {}", format_time(item.watch_progress as f64))
-                        } else {
-                            human_size(item.file_size)
-                        }),
-                    ),
-            )
-    }
-
-    fn grid(&self, items: &[&MediaItem], key: &str, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut g = div().flex().flex_wrap().gap_5();
-        for item in items {
-            g = g.child(self.media_card(item, key, p, cx));
-        }
-        g
-    }
-
-    fn empty_state(&self, title: &str, body: &str, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap_4()
-            .py_16()
-            .px_8()
-            .rounded_2xl()
-            .border_1()
-            .border_color(rgb(p.border_soft))
-            .bg(rgb(p.surface))
-            .child(div().text_3xl().text_color(rgb(p.accent)).child("▤"))
-            .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(title.to_string()))
-            .child(div().text_sm().text_color(rgb(p.muted)).child(body.to_string()))
-            .child(self.add_library_row(p, cx))
-    }
-
-    fn home_page(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
-        if self.media.is_empty() {
-            return self
-                .empty_state("Welcome to RustMediaHub", "Add a folder with movies, shows or music to get started.", p, cx)
-                .into_any_element();
-        }
-        let mut cont: Vec<&MediaItem> = self.media.iter().filter(|m| m.watch_progress > 0 && !m.watched).collect();
-        cont.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        cont.truncate(10);
-        let mut recent: Vec<&MediaItem> = self.media.iter().collect();
-        recent.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        recent.truncate(12);
-
-        div()
-            .flex()
-            .flex_col()
-            .gap_8()
-            .when(!cont.is_empty(), |d| {
-                d.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_4()
-                        .child(self.section_title("Continue watching", p))
-                        .child(self.grid(&cont, "cont", p, cx)),
-                )
-            })
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .child(self.section_title("Recently added", p))
-                    .child(self.grid(&recent, "recent", p, cx)),
-            )
-            .into_any_element()
-    }
-
-    /// Library items matching the filter box, sorted by title
-    fn filtered_media(&self, cx: &App) -> Vec<&MediaItem> {
-        let filter = self.filter_input.read(cx).value().to_lowercase();
-        let mut items: Vec<&MediaItem> = self
-            .media
-            .iter()
-            .filter(|m| filter.is_empty() || m.title.to_lowercase().contains(&filter) || m.file_name.to_lowercase().contains(&filter))
-            .collect();
-        items.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
-        items
-    }
-
-    fn library_page(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
-        if self.media.is_empty() && self.libraries.is_empty() {
-            return self
-                .empty_state("Your library is empty", "Type a folder path or browse for one. It's scanned right away.", p, cx)
-                .into_any_element();
-        }
-        let items = self.filtered_media(cx);
-        let count = items.len();
-
-        div()
-            .flex()
-            .flex_col()
-            .gap_6()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_4()
-                    .child(div().w(px(320.0)).child(Input::new(&self.filter_input).w_full()))
-                    .child(self.add_library_row(p, cx)),
-            )
-            .child(div().text_sm().text_color(rgb(p.muted)).child(format!("{count} items")))
-            .child(self.grid(&items, "lib", p, cx))
-            .into_any_element()
-    }
-
-    fn discover_page(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let mut col = div().flex().flex_col().gap_6().child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(div().flex_1().child(Input::new(&self.discover_input).w_full()))
-                .child(
-                    self.button("discover-search", if self.searching { "Searching…" } else { "Search" }, true, p)
-                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.search_discover(cx))),
-                ),
-        );
-        if !self.svc.has_tmdb() {
-            col = col.child(
-                div()
-                    .p_4()
-                    .rounded_lg()
-                    .bg(rgb(p.surface))
-                    .border_1()
-                    .border_color(rgb(p.border))
-                    .text_sm()
-                    .text_color(rgb(p.muted))
-                    .child("Title search needs a TMDB API key (Settings). IMDb ids (tt…) work without it."),
-            );
-        }
-
-        if !self.movies.is_empty() {
-            let mut list = div().flex().flex_wrap().gap_4();
-            for (i, m) in self.movies.iter().enumerate().take(24) {
-                let selected = self.selected_movie == Some(i);
-                let (c1, c2) = tile_colors(&m.title);
-                list = list.child(
-                    div()
-                        .id(format!("movie-{i}"))
-                        .w(px(260.0))
-                        .flex()
-                        .gap_3()
-                        .p_3()
-                        .rounded_xl()
-                        .cursor_pointer()
-                        .bg(rgb(if selected { p.active } else { p.surface }))
-                        .border_1()
-                        .border_color(rgb(if selected { p.accent } else { p.border_soft }))
-                        .hover(|s| s.border_color(rgb(p.accent)))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.select_movie(i, cx)))
-                        .child(
-                            div()
-                                .w(px(54.0))
-                                .h(px(80.0))
-                                .flex_none()
-                                .rounded_md()
-                                .bg(linear_gradient(160.0, linear_color_stop(rgb(c1), 0.0), linear_color_stop(rgb(c2), 1.0)))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_color(rgba(0xFFFFFFCC))
-                                .font_weight(FontWeight::BOLD)
-                                .child(initials(&m.title)),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .min_w_0()
-                                .child(div().text_sm().font_weight(FontWeight::MEDIUM).truncate().child(m.title.clone()))
-                                .child(div().text_xs().text_color(rgb(p.muted)).child(format!(
-                                    "{}{}",
-                                    m.year.map(|y| y.to_string()).unwrap_or_default(),
-                                    m.rating.map(|r| format!(" · ★ {r:.1}")).unwrap_or_default()
-                                )))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(p.faint))
-                                        .line_clamp(2)
-                                        .child(m.overview.clone().unwrap_or_default()),
-                                ),
-                        ),
-                );
-            }
-            col = col.child(self.section_title("Movies", p)).child(list);
-        }
-
-        if self.searching && self.streams.is_empty() {
-            col = col.child(div().text_sm().text_color(rgb(p.muted)).child("Looking for streams…"));
-        }
-
-        if !self.streams.is_empty() {
-            let mut rows = div().flex().flex_col().gap_1();
-            for (i, s) in self.streams.iter().enumerate().take(60) {
-                rows = rows.child(
-                    div()
-                        .id(format!("stream-{i}"))
-                        .flex()
-                        .items_center()
-                        .gap_4()
-                        .px_4()
-                        .py_3()
-                        .rounded_lg()
-                        .bg(rgb(p.surface))
-                        .cursor_pointer()
-                        .hover(|st| st.bg(rgb(p.surface_raised)))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.play_stream(i, cx)))
-                        .child(
-                            div()
-                                .w(px(64.0))
-                                .text_xs()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(if s.rd_cached { p.good } else { p.muted }))
-                                .child(if s.rd_cached { "⚡ RD" } else { "P2P" }),
-                        )
-                        .child(div().w(px(200.0)).text_sm().truncate().child(s.quality.clone()))
-                        .child(div().w(px(90.0)).text_xs().text_color(rgb(p.muted)).child(s.size.clone().unwrap_or_default()))
-                        .child(
-                            div()
-                                .w(px(70.0))
-                                .text_xs()
-                                .text_color(rgb(p.muted))
-                                .child(s.seeders.map(|n| format!("▲ {n}")).unwrap_or_default()),
-                        )
-                        .child(div().flex_1().min_w_0().text_xs().text_color(rgb(p.faint)).truncate().child(s.title.clone()))
-                        .child(div().text_sm().text_color(rgb(p.accent)).child("Play ▶")),
-                );
-            }
-            col = col.child(self.section_title(format!("Streams ({})", self.streams.len()), p)).child(rows);
-        }
-        col.into_any_element()
-    }
-
-    fn card(&self, p: Palette) -> Div {
-        div().flex().flex_col().gap_4().p_6().rounded_2xl().bg(rgb(p.surface)).border_1().border_color(rgb(p.border_soft))
-    }
-
-    fn settings_page(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let mut libs = div().flex().flex_col().gap_2();
-        if self.libraries.is_empty() {
-            libs = libs.child(div().text_sm().text_color(rgb(p.muted)).child("No libraries yet."));
-        }
-        for lib in &self.libraries {
-            let (id, scan_lib) = (lib.id, lib.clone());
-            let count = self.media.iter().filter(|m| m.file_path.starts_with(&lib.path)).count();
-            libs = libs.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .px_4()
-                    .py_3()
-                    .rounded_lg()
-                    .bg(rgb(p.surface_raised))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(lib.name.clone()))
-                            .child(div().text_xs().text_color(rgb(p.muted)).truncate().child(format!("{} · {count} items", lib.path))),
-                    )
-                    .child(
-                        self.button(format!("scan-{id}"), "Rescan", false, p)
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.scan_library(scan_lib.clone(), cx))),
-                    )
-                    .child(
-                        self.button(format!("rm-{id}"), "Remove", false, p)
-                            .text_color(rgb(p.danger))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.remove_library(id, cx))),
-                    ),
-            );
-        }
-
-        let field = |label: &'static str, hint: &'static str, input: &Entity<InputState>| {
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label))
-                .child(Input::new(input).w_full())
-                .child(div().text_xs().text_color(rgb(p.faint)).child(hint))
-        };
-
-        div()
-            .flex()
-            .flex_col()
-            .gap_6()
-            .max_w(px(860.0))
-            .child(
-                self.card(p)
-                    .child(self.section_title("Libraries", p))
-                    .child(libs)
-                    .child(self.add_library_row(p, cx)),
-            )
-            .child(
-                self.card(p)
-                    .child(self.section_title("Services", p))
-                    .child(field("TMDB API key", "Used for title search in Discover. Stored in ~/.config/rustmediahub.", &self.tmdb_input))
-                    .child(field("Real-Debrid API key", "Optional. Cached torrents then play instantly over HTTPS.", &self.rd_input))
-                    .child(field("mpv executable", "Leave as mpv to use the one on PATH.", &self.mpv_input))
-                    .child(
-                        div().flex().child(
-                            self.button("save-settings", "Save settings", true, p)
-                                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.save_settings(cx))),
-                        ),
-                    ),
-            )
-            .child(
-                self.card(p)
-                    .child(self.section_title("Status", p))
-                    .child(status_line(
-                        p,
-                        self.mpv_version.is_some(),
-                        match &self.mpv_version {
-                            Some(v) => format!("Player: {v} (separate window, JSON IPC)"),
-                            None => "Player: mpv not found. Install it: sudo apt install mpv".to_string(),
-                        },
-                    ))
-                    .child(status_line(
-                        p,
-                        self.svc.has_tmdb(),
-                        if self.svc.has_tmdb() { "TMDB: configured" } else { "TMDB: not configured" }.to_string(),
-                    ))
-                    .child(status_line(
-                        p,
-                        self.svc.has_real_debrid(),
-                        if self.svc.has_real_debrid() { "Real-Debrid: configured" } else { "Real-Debrid: not configured (P2P only)" }
-                            .to_string(),
-                    ))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(p.faint))
-                            .child("Shortcuts: Space play/pause · ←/→ seek 10s · ↑/↓ volume · S stop · Ctrl+1–4 pages · Esc leaves a text field"),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn now_playing_bar(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let n = self.now.as_ref().expect("checked by caller");
-        let ctrl = |id: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .size(px(36.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .cursor_pointer()
-                .text_sm()
-                .text_color(rgb(p.text))
-                .hover(|s| s.bg(rgb(p.surface_raised)))
-                .child(label)
-        };
-        let starting = !n.seen_active;
-        div()
-            .flex()
-            .items_center()
-            .gap_5()
-            .px_6()
-            .py_3()
-            .bg(rgb(p.sidebar))
-            .border_t_1()
-            .border_color(rgb(p.border))
-            .child(
-                div()
-                    .w(px(240.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child({
-                        let (c1, c2) = tile_colors(&n.title);
-                        div()
-                            .size(px(44.0))
-                            .flex_none()
-                            .rounded_md()
-                            .bg(linear_gradient(160.0, linear_color_stop(rgb(c1), 0.0), linear_color_stop(rgb(c2), 1.0)))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_xs()
-                            .font_weight(FontWeight::BOLD)
-                            .child(initials(&n.title))
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .min_w_0()
-                            .child(div().text_sm().font_weight(FontWeight::MEDIUM).truncate().child(n.title.clone()))
-                            .child(div().text_xs().text_color(rgb(p.muted)).child(if starting {
-                                "Starting mpv…"
-                            } else if n.paused {
-                                "Paused"
-                            } else {
-                                "Now playing"
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(ctrl("np-back", "«10").on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.seek_relative(-10.0, cx))))
-                    .child(
-                        div()
-                            .id("np-play")
-                            .size(px(42.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .cursor_pointer()
-                            .bg(rgb(p.text))
-                            .text_color(rgb(p.canvas))
-                            .hover(|s| s.opacity(0.9))
-                            .child(if n.paused { "▶" } else { "❚❚" })
-                            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.toggle_pause(cx))),
-                    )
-                    .child(ctrl("np-fwd", "10»").on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.seek_relative(10.0, cx))))
-                    .child(ctrl("np-stop", "■").on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.stop(cx)))),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(div().text_xs().text_color(rgb(p.muted)).child(format_time(n.position)))
-                    .child(div().flex_1().child(Slider::new(&self.seek_slider)))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(p.muted))
-                            .child(n.duration.map(format_time).unwrap_or_else(|| "--:--".into())),
-                    ),
-            )
-            .child(
-                div()
-                    .w(px(170.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(div().text_xs().text_color(rgb(p.muted)).child(format!("Vol {:.0}", self.volume)))
-                    .child(div().flex_1().child(Slider::new(&self.volume_slider))),
-            )
+impl MediaHubView {
+    /// What "resume" means right now: newest in-progress item, else the first Up Next episode
+    pub(crate) fn resume_candidate(&self) -> Option<Uuid> {
+        self.continue_entries()
+            .first()
+            .map(|e| e.item.id)
+            .or_else(|| rmh_app::up_next(&self.entries).first().map(|e| e.item.id))
     }
 }
 
-fn status_line(p: Palette, ok: bool, text: String) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .text_sm()
-        .child(div().size(px(8.0)).rounded_full().bg(rgb(if ok { p.good } else { p.danger })))
-        .child(text)
+fn chrono_now() -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now()
 }
 
-fn human_size(bytes: i64) -> String {
-    let b = bytes.max(0) as f64;
-    if b >= 1e9 {
-        format!("{:.1} GB", b / 1e9)
-    } else if b >= 1e6 {
-        format!("{:.0} MB", b / 1e6)
-    } else if b >= 1e3 {
-        format!("{:.0} KB", b / 1e3)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
-impl Render for MediaHubView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = DARK;
-        // Keep keyboard shortcuts alive: if nothing has focus (startup, or the
-        // focused input was removed), focus the shell.
-        if window.focused(cx).is_none() {
-            window.focus(&self.focus_handle, cx);
-        }
-        let content = match self.page {
-            Page::Home => self.home_page(p, cx),
-            Page::Library => self.library_page(p, cx),
-            Page::Discover => self.discover_page(p, cx),
-            Page::Settings => self.settings_page(p, cx),
-        };
-
-        let mut main = div()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .h_full()
-            .min_w_0()
-            .child(self.top_bar(p))
-            .child(div().flex_1().w_full().overflow_y_scrollbar().child(div().px_8().py_6().child(content)));
-        if self.now.is_some() {
-            main = main.child(self.now_playing_bar(p, cx));
-        }
-
-        let mut shell = div()
-            .track_focus(&self.focus_handle)
-            .key_context("MediaHub")
-            .on_key_down(cx.listener(Self::on_key_down))
-            .relative()
-            .flex()
-            .size_full()
-            .bg(rgb(p.canvas))
-            .text_color(rgb(p.text))
-            .child(self.sidebar(p, cx))
-            .child(main);
-
-        if let Some(err) = self.error.clone() {
-            shell = shell.child(
-                div()
-                    .id("error-toast")
-                    .absolute()
-                    .top_5()
-                    .right_5()
-                    .max_w(px(440.0))
-                    .flex()
-                    .items_start()
-                    .gap_3()
-                    .p_4()
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(rgb(p.danger))
-                    .bg(rgb(p.surface_raised))
-                    .text_sm()
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                        this.error = None;
-                        cx.notify();
-                    }))
-                    .child(div().text_color(rgb(p.danger)).child("●"))
-                    .child(div().flex_1().child(err))
-                    .child(div().text_color(rgb(p.muted)).child("✕")),
-            );
-        }
-        shell
-    }
-}

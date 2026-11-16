@@ -14,6 +14,8 @@ rmh-metadata = { workspace = true }
 rmh-player = { workspace = true }
 rmh-scraper = { workspace = true }
 rmh-torrent = { workspace = true }
+rmh-trakt = { workspace = true }
+reqwest = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

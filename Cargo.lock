@@ -7458,6 +7458,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
+ "reqwest",
  "rmh-core",
  "rmh-database",
  "rmh-metadata",
@@ -7465,6 +7466,7 @@ dependencies = [
  "rmh-scanner",
  "rmh-scraper",
  "rmh-torrent",
+ "rmh-trakt",
  "serde",
  "serde_json",
  "tempfile",
@@ -7502,10 +7504,13 @@ dependencies = [
 name = "rmh-gpui"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "gpui-kit",
+ "raw-window-handle",
  "rmh-app",
  "tracing",
  "uuid",
+ "x11rb",
 ]
 
 [[package]]
@@ -7598,6 +7603,20 @@ dependencies = [
  "tower-http 0.5.2",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "rmh-trakt"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dirs 5.0.1",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

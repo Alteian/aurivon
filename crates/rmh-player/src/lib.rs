@@ -80,8 +80,143 @@ pub struct PlaybackSnapshot {
     pub muted: bool,
     pub eof: bool,
     pub title: Option<String>,
+    /// Chapters of the current file (`chapter-list`)
+    pub chapters: Vec<Chapter>,
+    /// Index of the current chapter
+    pub chapter: Option<i64>,
+    /// Audio / subtitle / video tracks (`track-list`)
+    pub tracks: Vec<Track>,
+    pub fullscreen: bool,
+    /// Playback speed (1.0 = normal)
+    pub speed: f64,
+    /// Path or URL of the loaded file
+    pub path: Option<String>,
     /// Last error reported by mpv or the actor (e.g. file failed to load)
     pub last_error: Option<String>,
+}
+
+/// A chapter marker
+#[derive(Debug, Clone, PartialEq)]
+pub struct Chapter {
+    pub title: String,
+    /// Start time in seconds
+    pub time: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackKind {
+    Audio,
+    Sub,
+    Video,
+}
+
+impl TrackKind {
+    /// mpv property selecting this kind of track
+    pub fn property(self) -> &'static str {
+        match self {
+            TrackKind::Audio => "aid",
+            TrackKind::Sub => "sid",
+            TrackKind::Video => "vid",
+        }
+    }
+}
+
+/// An audio, subtitle or video track
+#[derive(Debug, Clone, PartialEq)]
+pub struct Track {
+    pub id: i64,
+    pub kind: TrackKind,
+    pub title: Option<String>,
+    pub lang: Option<String>,
+    pub codec: Option<String>,
+    pub selected: bool,
+    pub external: bool,
+}
+
+impl Track {
+    /// "English (eac3) - Commentary"
+    pub fn label(&self) -> String {
+        let mut out = match (&self.lang, &self.title) {
+            (Some(l), Some(t)) => format!("{} - {t}", lang_name(l)),
+            (Some(l), None) => lang_name(l).to_string(),
+            (None, Some(t)) => t.clone(),
+            (None, None) => format!("Track {}", self.id),
+        };
+        if let Some(c) = &self.codec {
+            out.push_str(&format!(" ({c})"));
+        }
+        if self.external {
+            out.push_str(" [ext]");
+        }
+        out
+    }
+}
+
+fn lang_name(code: &str) -> &str {
+    match code {
+        "eng" | "en" => "English",
+        "cze" | "ces" | "cs" => "Czech",
+        "slo" | "slk" | "sk" => "Slovak",
+        "ger" | "deu" | "de" => "German",
+        "fre" | "fra" | "fr" => "French",
+        "spa" | "es" => "Spanish",
+        "ita" | "it" => "Italian",
+        "pol" | "pl" => "Polish",
+        "rus" | "ru" => "Russian",
+        "jpn" | "ja" => "Japanese",
+        "kor" | "ko" => "Korean",
+        "chi" | "zho" | "zh" => "Chinese",
+        "por" | "pt" => "Portuguese",
+        "hun" | "hu" => "Hungarian",
+        "und" => "Unknown",
+        other => other,
+    }
+}
+
+fn parse_chapters(v: Option<&Value>) -> Vec<Chapter> {
+    v.and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .enumerate()
+                .map(|(i, c)| Chapter {
+                    title: c
+                        .get("title")
+                        .and_then(|t| t.as_str())
+                        .filter(|t| !t.is_empty())
+                        .map(|t| t.to_string())
+                        .unwrap_or_else(|| format!("Chapter {}", i + 1)),
+                    time: c.get("time").and_then(|t| t.as_f64()).unwrap_or(0.0),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_tracks(v: Option<&Value>) -> Vec<Track> {
+    v.and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| {
+                    let kind = match t.get("type")?.as_str()? {
+                        "audio" => TrackKind::Audio,
+                        "sub" => TrackKind::Sub,
+                        "video" => TrackKind::Video,
+                        _ => return None,
+                    };
+                    let s = |k: &str| t.get(k).and_then(|v| v.as_str()).map(|v| v.to_string());
+                    Some(Track {
+                        id: t.get("id")?.as_i64()?,
+                        kind,
+                        title: s("title"),
+                        lang: s("lang"),
+                        codec: s("codec"),
+                        selected: t.get("selected").and_then(|v| v.as_bool()).unwrap_or(false),
+                        external: t.get("external").and_then(|v| v.as_bool()).unwrap_or(false),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Messages sent to the background actor
@@ -229,6 +364,50 @@ impl Player {
         self.command(vec![json!("set_property"), json!("volume"), json!(v)])
     }
 
+    /// Jump to chapter `index` (0-based)
+    pub fn set_chapter(&self, index: i64) -> Result<()> {
+        self.command(vec![json!("set_property"), json!("chapter"), json!(index.max(0))])
+    }
+
+    /// Next (+1) / previous (-1) chapter
+    pub fn step_chapter(&self, delta: i64) -> Result<()> {
+        self.command(vec![json!("add"), json!("chapter"), json!(delta)])
+    }
+
+    /// Select a track by id, or disable that kind with `None` (e.g. subtitles off)
+    pub fn set_track(&self, kind: TrackKind, id: Option<i64>) -> Result<()> {
+        let value = id.map(|i| json!(i)).unwrap_or(json!("no"));
+        self.command(vec![json!("set_property"), json!(kind.property()), value])
+    }
+
+    /// Load an external subtitle file
+    pub fn add_subtitle(&self, path: &str) -> Result<()> {
+        self.command(vec![json!("sub-add"), json!(path), json!("select")])
+    }
+
+    pub fn set_fullscreen(&self, on: bool) -> Result<()> {
+        self.command(vec![json!("set_property"), json!("fullscreen"), json!(on)])
+    }
+
+    pub fn toggle_fullscreen(&self) -> Result<()> {
+        self.command(vec![json!("cycle"), json!("fullscreen")])
+    }
+
+    /// Set playback speed (1.0 = normal)
+    pub fn set_speed(&self, speed: f64) -> Result<()> {
+        self.command(vec![json!("set_property"), json!("speed"), json!(speed.clamp(0.25, 4.0))])
+    }
+
+    /// Step one frame forward (`true`) or back; pauses playback
+    pub fn frame_step(&self, forward: bool) -> Result<()> {
+        self.command(vec![json!(if forward { "frame-step" } else { "frame-back-step" })])
+    }
+
+    /// Show text on mpv's OSD
+    pub fn show_text(&self, text: &str) -> Result<()> {
+        self.command(vec![json!("show-text"), json!(text), json!(1500)])
+    }
+
     pub fn set_muted(&self, muted: bool) -> Result<()> {
         self.command(vec![json!("set_property"), json!("mute"), json!(muted)])
     }
@@ -286,6 +465,12 @@ impl MpvSession {
             format!("--volume={}", config.volume),
             format!("--osc={}", if config.osc { "yes" } else { "no" }),
             "--keep-open=yes".to_string(),
+            // Same streaming cache as the original libmpv build
+            "--cache=yes".to_string(),
+            "--cache-secs=120".to_string(),
+            "--demuxer-max-bytes=500MiB".to_string(),
+            // OSC: chapter marks on the seek bar, idle logo off, hide quickly
+            "--script-opts=osc-seekbarstyle=bar,osc-hidetimeout=1200,osc-idlescreen=no,osc-deadzonesize=0.2".to_string(),
             "--input-default-bindings=yes".to_string(),
             "--title=RustMediaHub Player - ${media-title}".to_string(),
             "--no-terminal".to_string(),
@@ -301,6 +486,11 @@ impl MpvSession {
         }
         if let Some(wid) = config.wid {
             args.push(format!("--wid={wid}"));
+            // Mouse goes to mpv (OSC seek bar, double-click), keys stay with the
+            // host app so its shortcuts work wherever the pointer is
+            args.push("--input-cursor=yes".into());
+            args.push("--input-vo-keyboard=no".into());
+            args.push("--cursor-autohide=1000".into());
         }
         if config.fullscreen {
             args.push("--fs".into());
@@ -344,6 +534,7 @@ impl MpvSession {
 
         for (id, prop) in [
             "time-pos", "duration", "pause", "volume", "mute", "eof-reached", "idle-active", "media-title",
+            "chapter-list", "chapter", "track-list", "fullscreen", "speed", "path",
         ]
         .iter()
         .enumerate()
@@ -409,6 +600,9 @@ async fn run_player_actor(
                             }
                         }
                         if let Ok(mut st) = state.write() {
+                            st.chapters.clear();
+                            st.chapter = None;
+                            st.tracks.clear();
                             st.position = 0.0;
                             st.duration = None;
                             st.eof = false;
@@ -508,6 +702,12 @@ fn handle_ipc_event(val: &Value, state: &Arc<RwLock<PlaybackSnapshot>>) {
                     }
                 }
                 "media-title" => s.title = data.and_then(|v| v.as_str()).map(|t| t.to_string()),
+                "chapter-list" => s.chapters = parse_chapters(data),
+                "chapter" => s.chapter = data.and_then(|v| v.as_i64()).filter(|c| *c >= 0),
+                "track-list" => s.tracks = parse_tracks(data),
+                "fullscreen" => s.fullscreen = data.and_then(|v| v.as_bool()).unwrap_or(false),
+                "speed" => s.speed = data.and_then(|v| v.as_f64()).unwrap_or(1.0),
+                "path" => s.path = data.and_then(|v| v.as_str()).map(|t| t.to_string()),
                 _ => {}
             }
         }
@@ -545,6 +745,26 @@ mod tests {
         assert!(s.paused);
         assert_eq!(s.volume, 42.0);
         assert!(s.last_error.unwrap().contains("unrecognized"));
+    }
+
+    #[test]
+    fn parses_chapters_and_tracks() {
+        let state = Arc::new(RwLock::new(PlaybackSnapshot::default()));
+        handle_ipc_event(&json!({"event":"property-change","name":"chapter-list","data":[
+            {"title":"Opening","time":0.0},{"time":95.5}]}), &state);
+        handle_ipc_event(&json!({"event":"property-change","name":"chapter","data":1}), &state);
+        handle_ipc_event(&json!({"event":"property-change","name":"track-list","data":[
+            {"id":1,"type":"video","codec":"h264","selected":true},
+            {"id":1,"type":"audio","lang":"eng","codec":"eac3","selected":true},
+            {"id":2,"type":"audio","lang":"cze","title":"Dabing","codec":"ac3","selected":false},
+            {"id":1,"type":"sub","lang":"eng","codec":"subrip","external":true,"selected":false}]}), &state);
+        let s = state.read().unwrap().clone();
+        assert_eq!(s.chapters, vec![Chapter { title: "Opening".into(), time: 0.0 }, Chapter { title: "Chapter 2".into(), time: 95.5 }]);
+        assert_eq!(s.chapter, Some(1));
+        assert_eq!(s.tracks.len(), 4);
+        let cz = s.tracks.iter().find(|t| t.kind == TrackKind::Audio && t.id == 2).unwrap();
+        assert_eq!(cz.label(), "Czech - Dabing (ac3)");
+        assert!(s.tracks.iter().any(|t| t.kind == TrackKind::Sub && t.external));
     }
 
     #[test]

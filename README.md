@@ -206,20 +206,39 @@ Application data is stored in:
 3. **Scan:** the folder is scanned recursively right after adding it. Use **Scan** in
    Settings to pick up new files later, and **Refresh** to reload the grid.
 
-4. **Play:** click a card. mpv opens in its own window; the app shows a
-   **Now playing** bar with ⏪10s / Play-Pause / 10s⏩ / Stop, a seek slider, time and
-   volume. Closing the mpv window also ends playback. Progress is saved and playback
-   resumes from there next time; items watched past 90% are marked ✓.
+4. **Play:** double-click a card (single click opens the TMDB details page with
+   seasons/episodes). Video plays **inside the app window** (mpv draws into an X11
+   child window; on Wayland the app runs through XWayland). Around the video:
+   - seek bar with **chapter marks** and a **thumbnail preview** on hover (needs `ffmpeg`)
+   - side panel: **Chapters**, **Audio** and **Subtitle** tracks (incl. loading a file), **Speed**
+   - **Skip intro / recap / credits** from chapter names, **frame stepping**, speed 0.25–3×
+   - **Autoplay next episode** with a 10 s countdown (Play now / Cancel)
+   - theater / fullscreen mode; mpv's own on-screen controller still works over the video.
+   Progress is saved and resumes next time; items watched past 90 % are marked ✓.
+   Settings → Player → *Separate mpv window* restores the old standalone fullscreen window.
 
-### App shortcuts (while something plays)
+5. **Home:** three layouts to compare (Settings → Home layout, the pills on Home, or `Ctrl+L`):
+   **A** Continue watching + Up next, **B** Discover with a trending hero, **C** library grid.
 
-- `Space` - Pause/Play
-- `←/→` - Seek 10 seconds
+### App shortcuts
 
-### mpv window shortcuts
+- `Space`/`K` play/pause · `←/→` 10 s (`Shift` 60 s) · `↑/↓` volume · `M` mute
+- `PgUp/PgDn` next/previous chapter · `I` skip intro · `N` next episode
+- `,`/`.` frame back/forward · `[`/`]` speed · `Backspace` normal speed
+- `A` cycle audio · `J` cycle subtitles · `T` side-panel tab · `F` fullscreen · `Esc` leave · `S` stop
+- `Enter` resume top Continue-watching item · `Ctrl+1–5` pages · `Ctrl+L` home layout · `Ctrl+I` details
 
-- `Space` - Pause/Play, `←/→` - Seek 5 s, `↑/↓` - Seek 1 min, `9/0` - Volume
-- `f` - Toggle fullscreen, `s` - Screenshot, `q` - Quit
+### Trakt
+
+1. Create an API app at <https://trakt.tv/oauth/applications> with redirect URI
+   `urn:ietf:wg:oauth:2.0:oob`.
+2. Paste its client id + secret in Settings → Services → Trakt (or set
+   `TRAKT_CLIENT_ID` / `TRAKT_CLIENT_SECRET`) and click **Save & connect**.
+3. Enter the shown code at <https://trakt.tv/activate>. The token is stored in
+   `~/.config/rustmediahub/trakt.json` (mode 0600).
+
+Then playback is scrobbled (start/pause/stop), **Sync now** syncs watched history both
+ways, and Trakt watchlist / progress rows appear on Home.
 
 ### Test the player without the GUI
 
