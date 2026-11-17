@@ -1,0 +1,19 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=RustMediaHub
+GenericName=Media Center
+Comment=Find, browse and play movies and series
+Exec=@LAUNCHER@
+TryExec=@LAUNCHER@
+Icon=rustmediahub
+Terminal=false
+Categories=AudioVideo;Player;Video;
+Keywords=movies;series;tv;shows;stremio;trakt;player;mpv;media;
+StartupNotify=true
+StartupWMClass=rustmediahub
+Actions=check-update;
+
+[Desktop Action check-update]
+Name=Check for Updates
+Exec=@LAUNCHER@ --update-notify

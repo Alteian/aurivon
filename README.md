@@ -200,6 +200,53 @@ Application data is stored in:
 - **macOS:** `~/Library/Application Support/rustmediahub/`
 - **Windows:** `%LOCALAPPDATA%\rustmediahub\`
 
+## Install & updates
+
+```bash
+make install        # release build -> ~/.local, app launcher entry + icons
+make uninstall      # remove (library/settings kept; scripts/uninstall.sh --purge removes them)
+```
+
+- The app appears in the app launcher (COSMIC launcher / app library, GNOME, KDE) as
+  **RustMediaHub**; from a terminal run `rustmediahub` (`~/.local/bin`).
+- Files: `~/.local/share/rustmediahub/app/versions/<version>` (+ `current` symlink),
+  launcher wrapper `~/.local/bin/rustmediahub`, `~/.local/share/applications/rustmediahub.desktop`,
+  icons in `~/.local/share/icons/hicolor`, log in `~/.local/state/rustmediahub/rustmediahub.log`.
+- API keys: the installed app reads `~/.config/rustmediahub/.env` (mode 0600).
+  `make install` copies `TMDB_API_KEY` and `REAL_DEBRID_API_KEY` there from the repo `.env`
+  the first time; Settings can override them. Other services are optional.
+- On Wayland the launcher runs the app through XWayland so video stays embedded.
+
+**Updates.** Releases are GitHub releases tagged `vMAJOR.MINOR.PATCH` with a tarball and
+its sha256. The app checks on startup and every 6 hours (Settings → Updates), shows
+*Update available* with the changelog, downloads, verifies the checksum, installs the new
+version next to the old one, switches atomically and offers a restart. Pre-releases
+(`0.3.0-beta.1`) are only offered when opted in. From a terminal:
+
+```bash
+rustmediahub --version
+rustmediahub --check-update     # add --pre to include pre-releases
+rustmediahub --update
+```
+
+The repository is private, so the updater authenticates with your GitHub login:
+`gh auth token` (be logged in with `gh auth login`), or a token in
+`RMH_GITHUB_TOKEN` / `~/.config/rustmediahub/github_token`. No token is stored by the app.
+
+**Releasing.** From a clean tree (normally on `master`):
+
+```bash
+scripts/release.sh patch            # 0.2.0 -> 0.2.1   fixes
+scripts/release.sh minor            # 0.2.1 -> 0.3.0   features
+scripts/release.sh major            # 0.3.0 -> 1.0.0   breaking
+scripts/release.sh minor --pre beta # 0.3.0-beta.1 (pre-release)
+```
+
+It bumps the version in `Cargo.toml`, moves the *Unreleased* notes in `CHANGELOG.md`
+into the new version (or uses commit subjects), runs the tests, builds and packages
+`dist/rustmediahub-<v>-x86_64-linux.tar.gz` + `.sha256`, commits, tags, pushes and runs
+`gh release create`. Installed apps pick it up on their next check.
+
 ## Usage
 
 1. **Launch the application:**

@@ -16,6 +16,7 @@ pub mod config;
 pub mod service;
 pub mod session;
 pub mod trakt;
+pub mod update;
 
 pub use catalog::{next_episode, up_next, LibraryEntry, SeasonSummary, TitleCard, TitleKind};
 pub use calendar::{month_grid, CalendarItem, CalendarMonth, ReleaseKind};

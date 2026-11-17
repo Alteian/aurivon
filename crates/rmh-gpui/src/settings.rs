@@ -19,6 +19,10 @@ fn status_line(p: Palette, ok: bool, text: String) -> impl IntoElement {
 }
 
 impl MediaHubView {
+    pub(crate) fn toggle_row_pub(&self, id: &'static str, label: &'static str, hint: &'static str, on: bool, p: Palette) -> Stateful<Div> {
+        self.toggle_row(id, label, hint, on, p)
+    }
+
     fn toggle_row(&self, id: &'static str, label: &'static str, hint: &'static str, on: bool, p: Palette) -> Stateful<Div> {
         div()
             .id(id)
@@ -230,11 +234,9 @@ impl MediaHubView {
                 },
             ))
             .child(status_line(p, self.svc.has_tmdb(), if self.svc.has_tmdb() { "TMDB: configured" } else { "TMDB: not configured" }.into()))
-            .child(status_line(
-                p,
-                self.trakt.logged_in,
-                if self.trakt.logged_in { "Trakt: connected" } else if self.trakt.configured { "Trakt: not logged in" } else { "Trakt: not configured" }.into(),
-            ))
+            .when(self.trakt.configured, |d| {
+                d.child(status_line(p, self.trakt.logged_in, if self.trakt.logged_in { "Trakt: connected" } else { "Trakt: not logged in" }.into()))
+            })
             .child(status_line(
                 p,
                 self.svc.has_real_debrid(),
@@ -254,6 +256,7 @@ impl MediaHubView {
             .child(player)
             .child(services)
             .child(self.more_services(p, cx))
+            .child(self.updates_card(p, cx))
             .child(status)
             .into_any_element()
     }

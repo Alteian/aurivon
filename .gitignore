@@ -45,3 +45,4 @@ windows_release.zip
 # Local copies and screenshots
 windows_release*/
 mpv-shot*.jpg
+dist

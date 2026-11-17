@@ -12,6 +12,7 @@ mod search;
 mod settings;
 mod theme;
 mod ui;
+mod updates;
 mod view;
 
 use gpui_kit::assets::Assets;
@@ -47,7 +48,7 @@ pub fn run() -> Result<(), String> {
             titlebar: Some(TitlebarOptions { title: Some("RustMediaHub".into()), ..Default::default() }),
             window_bounds: Some(WindowBounds::centered(size(px(1440.0), px(900.0)), cx)),
             window_min_size: Some(size(px(1024.0), px(680.0))),
-            app_id: Some("org.rustmediahub.desktop".to_string()),
+            app_id: Some("rustmediahub".to_string()), // matches rustmediahub.desktop (launcher icon)
             ..Default::default()
         };
         let svc = svc.clone();

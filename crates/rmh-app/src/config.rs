@@ -76,6 +76,13 @@ pub struct AppConfig {
     pub anilist_client_id: Option<String>,
     #[serde(default = "yes")]
     pub anilist_sync: bool,
+
+    /// Check GitHub releases on startup and every few hours
+    #[serde(default = "yes")]
+    pub auto_update: bool,
+    /// Offer pre-releases (e.g. 0.3.0-beta.1) too
+    #[serde(default)]
+    pub update_prereleases: bool,
 }
 
 fn default_tz() -> String {
@@ -176,6 +183,8 @@ impl Default for AppConfig {
             simkl_scrobble: true,
             anilist_client_id: std::env::var("ANILIST_CLIENT_ID").ok(),
             anilist_sync: true,
+            auto_update: true,
+            update_prereleases: false,
         }
     }
 }
@@ -284,6 +293,11 @@ impl AppConfig {
 
     pub fn mpv_path(&self) -> String {
         self.mpv_path.clone().filter(|p| !p.trim().is_empty()).unwrap_or_else(|| "mpv".to_string())
+    }
+
+    /// `~/.config/rustmediahub/.env`: API keys for the installed app (chmod 600)
+    pub fn user_env_path() -> Option<PathBuf> {
+        dirs::config_dir().map(|d| d.join("rustmediahub").join(".env"))
     }
 
     pub fn config_path() -> Result<PathBuf> {

@@ -1,0 +1,32 @@
+#!/bin/sh
+# RustMediaHub launcher, installed by install.sh. Starts the active version
+# from @APP_ROOT@/current (switched atomically by the updater).
+APP_ROOT="@APP_ROOT@"
+
+# Video is embedded through X11. On Wayland (COSMIC, GNOME, KDE) the app runs on
+# XWayland: it drops WAYLAND_DISPLAY itself when DISPLAY is set, so make sure
+# DISPLAY is known even if the launcher didn't pass it on.
+if [ -z "$DISPLAY" ] && command -v systemctl >/dev/null 2>&1; then
+    d=$(systemctl --user show-environment 2>/dev/null | sed -n 's/^DISPLAY=//p')
+    [ -n "$d" ] && DISPLAY="$d" && export DISPLAY
+fi
+
+# Started from the app launcher: keep a log instead of discarding output
+if [ ! -t 2 ]; then
+    LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/rustmediahub"
+    mkdir -p "$LOG_DIR"
+    [ -f "$LOG_DIR/rustmediahub.log" ] && mv -f "$LOG_DIR/rustmediahub.log" "$LOG_DIR/rustmediahub.log.1"
+    exec >"$LOG_DIR/rustmediahub.log" 2>&1
+fi
+
+if [ "$1" = "--update-notify" ]; then
+    # desktop action: check, install, and tell the user
+    out=$("$APP_ROOT/current/rustmediahub" --update 2>&1); status=$?
+    echo "$out"
+    msg=$(printf '%s\n' "$out" | grep -E '^(Installed |Up to date|Update available)' | tail -n 1)
+    [ $status -ne 0 ] && msg="Update failed: $(printf '%s\n' "$out" | tail -n 1)"
+    command -v notify-send >/dev/null 2>&1 && notify-send -i rustmediahub "RustMediaHub" "${msg:-Done}"
+    exit $status
+fi
+
+exec "$APP_ROOT/current/rustmediahub" "$@"

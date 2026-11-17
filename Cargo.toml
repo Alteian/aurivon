@@ -109,6 +109,7 @@ iced = ["dep:rmh-ui", "dep:iced"]
 
 [dependencies]
 rmh-gpui.workspace = true
+rmh-app.workspace = true
 rmh-ui = { workspace = true, optional = true }
 iced = { workspace = true, optional = true }
 tracing.workspace = true

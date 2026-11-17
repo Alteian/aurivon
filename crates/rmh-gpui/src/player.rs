@@ -357,10 +357,13 @@ impl MediaHubView {
                         div()
                             .flex()
                             .gap_2()
-                            .child(
-                                self.button("sub-os", if self.disc.subs_loading { "Searching…" } else { "Search OpenSubtitles" }, true, p)
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.search_subtitles(false, cx))),
-                            )
+                            // only offered once an OpenSubtitles key is configured
+                            .when(self.svc.has_opensubtitles(), |d| {
+                                d.child(
+                                    self.button("sub-os", if self.disc.subs_loading { "Searching…" } else { "Search OpenSubtitles" }, true, p)
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.search_subtitles(false, cx))),
+                                )
+                            })
                             .child(
                                 self.button("sub-load", "File…", false, p)
                                     .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.load_subtitle_file(cx))),

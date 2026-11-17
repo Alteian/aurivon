@@ -167,6 +167,7 @@ pub struct MediaHubView {
     pub(crate) mpv_version: Option<String>,
 
     pub(crate) disc: crate::disc::Disc,
+    pub(crate) upd: crate::updates::UpdateUi,
 
     pub(crate) focus_handle: FocusHandle,
     _poller: Task<()>,
@@ -294,6 +295,7 @@ impl MediaHubView {
             video: None,
             video_checked: false,
             disc,
+            upd: Default::default(),
             focus_handle,
             _poller: poller,
             _subscriptions: subscriptions,
@@ -306,6 +308,7 @@ impl MediaHubView {
             view.on_search_change(cx);
         }
         view.load_watchlist(cx);
+        view.start_update_loop(cx);
         view
     }
 

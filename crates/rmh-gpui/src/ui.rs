@@ -693,6 +693,7 @@ impl Render for MediaHubView {
                 .h_full()
                 .min_w_0()
                 .child(self.top_bar(p))
+                .when_some(self.update_banner(p, cx), |d, b| d.child(b))
                 .child(div().id("content").flex_1().w_full().overflow_y_scrollbar().child(div().px_8().py_6().child(content)))
                 .when(self.now.is_some(), |d| d.child(self.mini_player(p, cx)))
                 .into_any_element()
