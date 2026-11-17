@@ -44,6 +44,8 @@ impl Database {
     /// Run embedded migrations
     async fn run_migrations(&self) -> Result<()> {
         info!("Running database migrations...");
+        // Applied migrations are checksummed: never edit an existing file (not even a
+        // comment), add a new numbered one instead, or existing libraries fail to open.
         sqlx::migrate!("./migrations")
             .run(&self.pool)
             .await

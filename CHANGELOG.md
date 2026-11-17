@@ -5,6 +5,9 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+### Fixed
+- Existing libraries open again after the rename (0.3.0/0.3.1 changed an applied database migration and showed "Failed to run migrations"; no data was touched)
+
 ## [0.3.1] - 2026-11-17
 
 ### Fixed
