@@ -7,7 +7,11 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+pub mod browse;
 pub mod catalog;
+pub use browse::{
+    Airing, CastMember, Credit, DiscoverQuery, Release, Extras, Genre, ListKind, Person, PersonCard, Provider, ResultPage, SearchResults, Sort, Video,
+};
 pub use catalog::{cache_image, parse_release, Details, Episode, Kind, ParsedName, SeasonSummary, Title};
 
 pub(crate) const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3";
@@ -18,6 +22,8 @@ const TMDB_IMAGE_BASE: &str = "https://image.tmdb.org/t/p";
 pub struct TmdbClient {
     client: Client,
     api_key: String,
+    /// Optional on-disk cache for JSON responses (see `with_cache`)
+    pub(crate) cache_dir: Option<std::path::PathBuf>,
 }
 
 impl TmdbClient {
@@ -28,7 +34,7 @@ impl TmdbClient {
             .build()
             .context("Failed to create HTTP client")?;
 
-        Ok(Self { client, api_key })
+        Ok(Self { client, api_key, cache_dir: None })
     }
 
     /// Search for a movie by title

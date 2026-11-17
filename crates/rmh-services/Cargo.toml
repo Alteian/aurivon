@@ -1,0 +1,19 @@
+[package]
+name = "rmh-services"
+description = "OpenSubtitles, Simkl and AniList integrations for RustMediaHub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+dirs = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

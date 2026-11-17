@@ -83,9 +83,9 @@ pub struct TitleCard {
 }
 
 impl MediaService {
-    fn tmdb(&self) -> ServiceResult<TmdbClient> {
+    pub(crate) fn tmdb(&self) -> ServiceResult<TmdbClient> {
         let key = self.config().tmdb_api_key.filter(|k| !k.trim().is_empty()).ok_or("TMDB API key not set. Add it in Settings.")?;
-        TmdbClient::new(key.trim().to_string()).map_err(|e| format!("{e:#}"))
+        Ok(TmdbClient::new(key.trim().to_string()).map_err(|e| format!("{e:#}"))?.with_cache(self.inner.tmdb_cache.clone()))
     }
 
     pub fn image_dir(&self) -> PathBuf {
@@ -287,7 +287,7 @@ impl MediaService {
     }
 }
 
-async fn with_posters(titles: Vec<Title>, http: &reqwest::Client, dir: &Path) -> Vec<TitleCard> {
+pub(crate) async fn with_posters(titles: Vec<Title>, http: &reqwest::Client, dir: &Path) -> Vec<TitleCard> {
     let mut set = JoinSet::new();
     for (i, t) in titles.iter().enumerate() {
         if let Some(url) = t.poster_url(PosterSize::W342) {

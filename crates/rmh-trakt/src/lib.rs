@@ -181,6 +181,66 @@ impl Entry {
     }
 }
 
+/// Which Trakt calendar
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CalendarKind {
+    /// Every new episode
+    Shows,
+    /// New shows (season 1 premieres)
+    NewShows,
+    /// Season premieres
+    Premieres,
+    /// Theatrical movie releases
+    Movies,
+    /// Digital / physical releases
+    Dvd,
+}
+
+impl CalendarKind {
+    fn path(self) -> &'static str {
+        match self {
+            CalendarKind::Shows => "shows",
+            CalendarKind::NewShows => "shows/new",
+            CalendarKind::Premieres => "shows/premieres",
+            CalendarKind::Movies => "movies",
+            CalendarKind::Dvd => "dvd",
+        }
+    }
+}
+
+/// One calendar item
+#[derive(Debug, Clone)]
+pub struct CalendarEntry {
+    pub kind: CalendarKind,
+    /// RFC 3339 air time (episodes) or a plain date (movies)
+    pub when: String,
+    pub title: String,
+    pub year: Option<i32>,
+    pub tmdb_id: Option<i64>,
+    pub imdb_id: Option<String>,
+    pub episode: Option<(u32, u32, Option<String>)>,
+}
+
+impl CalendarEntry {
+    fn from_value(v: Value, kind: CalendarKind) -> Option<Self> {
+        let media: MediaRef = serde_json::from_value(v.get("show").or(v.get("movie"))?.clone()).ok()?;
+        let when = v.get("first_aired").or(v.get("released")).and_then(|w| w.as_str())?.to_string();
+        let episode = v.get("episode").and_then(|e| serde_json::from_value::<EpisodeRef>(e.clone()).ok()).map(|e| (e.season, e.number, e.title));
+        Some(Self {
+            kind,
+            when,
+            title: media.title.unwrap_or_default(),
+            year: media.year,
+            tmdb_id: media.ids.tmdb,
+            imdb_id: media.ids.imdb,
+            episode,
+        })
+    }
+    pub fn is_movie(&self) -> bool {
+        matches!(self.kind, CalendarKind::Movies | CalendarKind::Dvd)
+    }
+}
+
 /// Everything the user has watched, by TMDB id
 #[derive(Debug, Clone, Default)]
 pub struct Watched {
@@ -440,6 +500,24 @@ impl TraktClient {
         self.post("/sync/watchlist", sync_body(std::slice::from_ref(item))).await.map(|_| ())
     }
 
+    /// Release calendar. `my` = shows/movies the user follows (needs login),
+    /// otherwise everything on Trakt. Dates are UTC; `start` is YYYY-MM-DD.
+    pub async fn calendar(&self, my: bool, what: CalendarKind, start: &str, days: u32) -> Result<Vec<CalendarEntry>> {
+        let scope = if my { "my" } else { "all" };
+        let path = format!("/calendars/{scope}/{}/{start}/{}", what.path(), days.clamp(1, 33));
+        let req = if my || self.is_logged_in().await {
+            self.authed(reqwest::Method::GET, &path).await?
+        } else {
+            self.request(reqwest::Method::GET, &path)
+        };
+        let resp = req.send().await?;
+        if !resp.status().is_success() {
+            bail!("Trakt calendar failed: {}", resp.status());
+        }
+        let raw: Vec<Value> = resp.json().await?;
+        Ok(raw.into_iter().filter_map(|v| CalendarEntry::from_value(v, what)).collect())
+    }
+
     pub async fn add_show_to_watchlist(&self, show_tmdb: i64) -> Result<()> {
         self.post("/sync/watchlist", json!({ "shows": [{ "ids": { "tmdb": show_tmdb } }] })).await.map(|_| ())
     }
@@ -475,6 +553,19 @@ pub fn sync_body(items: &[Item]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_calendar_entries() {
+        let ep = json!({"first_aired": "2026-11-20T02:00:00.000Z", "episode": {"season": 2, "number": 5, "title": "X", "ids": {}},
+            "show": {"title": "Severance", "year": 2022, "ids": {"tmdb": 95396}}});
+        let e = CalendarEntry::from_value(ep, CalendarKind::Shows).unwrap();
+        assert_eq!(e.tmdb_id, Some(95396));
+        assert_eq!(e.episode.as_ref().map(|e| (e.0, e.1)), Some((2, 5)));
+        assert!(!e.is_movie());
+        let mv = json!({"released": "2026-11-21", "movie": {"title": "Dune 3", "year": 2026, "ids": {"tmdb": 1}}});
+        let m = CalendarEntry::from_value(mv, CalendarKind::Dvd).unwrap();
+        assert!(m.is_movie() && m.when == "2026-11-21");
+    }
 
     #[test]
     fn bodies() {

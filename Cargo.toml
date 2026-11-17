@@ -12,6 +12,7 @@ members = [
     "crates/rmh-ui",
     "crates/rmh-app",
     "crates/rmh-trakt",
+    "crates/rmh-services",
     "crates/rmh-gpui",
 ]
 
@@ -75,6 +76,7 @@ rmh-database = { path = "crates/rmh-database" }
 rmh-scanner = { path = "crates/rmh-scanner" }
 rmh-metadata = { path = "crates/rmh-metadata" }
 rmh-trakt = { path = "crates/rmh-trakt" }
+rmh-services = { path = "crates/rmh-services" }
 rmh-player = { path = "crates/rmh-player" }
 rmh-addon = { path = "crates/rmh-addon" }
 rmh-torrent = { path = "crates/rmh-torrent" }

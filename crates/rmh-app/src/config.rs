@@ -47,6 +47,66 @@ pub struct AppConfig {
     /// Show mpv's own on-screen controller over the video too
     #[serde(default = "yes")]
     pub mpv_osc: bool,
+
+    /// Country for "where to stream" and provider filters (ISO 3166-1, e.g. "CZ")
+    #[serde(default = "default_region")]
+    pub region: String,
+    /// Time zone for the release calendar (IANA name)
+    #[serde(default = "default_tz")]
+    pub timezone: String,
+
+    /// OpenSubtitles.com API key (consumer) and optional account for more downloads
+    #[serde(default)]
+    pub opensubtitles_api_key: Option<String>,
+    #[serde(default)]
+    pub opensubtitles_username: Option<String>,
+    #[serde(default)]
+    pub opensubtitles_password: Option<String>,
+    /// Fetch subtitles automatically when a file has none in a preferred language
+    #[serde(default = "yes")]
+    pub subtitles_auto: bool,
+
+    /// Simkl app client id (https://simkl.com/settings/developer/)
+    #[serde(default)]
+    pub simkl_client_id: Option<String>,
+    #[serde(default = "yes")]
+    pub simkl_scrobble: bool,
+    /// AniList API client id (https://anilist.co/settings/developer)
+    #[serde(default)]
+    pub anilist_client_id: Option<String>,
+    #[serde(default = "yes")]
+    pub anilist_sync: bool,
+}
+
+fn default_tz() -> String {
+    "Europe/Prague".into()
+}
+
+fn default_region() -> String {
+    "CZ".into()
+}
+
+/// ISO 639-2 ("cze", "eng") or 639-1 ("cs") to the 639-1 code OpenSubtitles uses
+pub fn lang_code(code: &str) -> String {
+    let c = code.trim().to_lowercase();
+    match c.as_str() {
+        "cze" | "ces" | "cz" => "cs".into(),
+        "eng" => "en".into(),
+        "slo" | "slk" => "sk".into(),
+        "ger" | "deu" => "de".into(),
+        "fre" | "fra" => "fr".into(),
+        "spa" => "es".into(),
+        "ita" => "it".into(),
+        "pol" => "pl".into(),
+        "hun" => "hu".into(),
+        "rus" => "ru".into(),
+        "ukr" => "uk".into(),
+        "jpn" => "ja".into(),
+        "kor" => "ko".into(),
+        "por" => "pt-PT".into(),
+        "chi" | "zho" => "zh-CN".into(),
+        _ => c,
+    }
 }
 
 /// Alternative home screens (switchable in Settings or on Home itself)
@@ -106,6 +166,16 @@ impl Default for AppConfig {
             home_layout: HomeLayout::default(),
             autoplay_next: true,
             mpv_osc: true,
+            region: default_region(),
+            timezone: default_tz(),
+            opensubtitles_api_key: std::env::var("OPENSUBTITLES_API_KEY").ok(),
+            opensubtitles_username: std::env::var("OPENSUBTITLES_USERNAME").ok(),
+            opensubtitles_password: std::env::var("OPENSUBTITLES_PASSWORD").ok(),
+            subtitles_auto: true,
+            simkl_client_id: std::env::var("SIMKL_CLIENT_ID").ok(),
+            simkl_scrobble: true,
+            anilist_client_id: std::env::var("ANILIST_CLIENT_ID").ok(),
+            anilist_sync: true,
         }
     }
 }
@@ -132,6 +202,17 @@ impl AppConfig {
         }
         if config.trakt_client_secret.as_deref().unwrap_or("").is_empty() {
             config.trakt_client_secret = std::env::var("TRAKT_CLIENT_SECRET").ok();
+        }
+        for (field, var) in [
+            (&mut config.opensubtitles_api_key, "OPENSUBTITLES_API_KEY"),
+            (&mut config.opensubtitles_username, "OPENSUBTITLES_USERNAME"),
+            (&mut config.opensubtitles_password, "OPENSUBTITLES_PASSWORD"),
+            (&mut config.simkl_client_id, "SIMKL_CLIENT_ID"),
+            (&mut config.anilist_client_id, "ANILIST_CLIENT_ID"),
+        ] {
+            if field.as_deref().unwrap_or("").is_empty() {
+                *field = std::env::var(var).ok();
+            }
         }
         Ok(config)
     }
@@ -169,6 +250,36 @@ impl AppConfig {
         #[cfg(not(unix))]
         std::fs::write(&config_path, content).context("Failed to write config file")?;
         Ok(())
+    }
+
+    /// Subtitle languages for OpenSubtitles, best first (from the subtitle
+    /// language preference; Czech + English by default)
+    pub fn subtitle_languages(&self) -> Vec<String> {
+        let v: Vec<String> = self
+            .sub_lang
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .filter(|l| !l.trim().is_empty())
+            .map(lang_code)
+            .collect();
+        if v.is_empty() {
+            vec!["cs".into(), "en".into()]
+        } else {
+            v
+        }
+    }
+
+    pub fn opensubtitles_key(&self) -> Option<String> {
+        self.opensubtitles_api_key.clone().map(|k| k.trim().to_string()).filter(|k| !k.is_empty())
+    }
+
+    pub fn simkl_id(&self) -> Option<String> {
+        self.simkl_client_id.clone().map(|k| k.trim().to_string()).filter(|k| !k.is_empty())
+    }
+
+    pub fn anilist_id(&self) -> Option<String> {
+        self.anilist_client_id.clone().map(|k| k.trim().to_string()).filter(|k| !k.is_empty())
     }
 
     pub fn mpv_path(&self) -> String {

@@ -15,12 +15,15 @@ rmh-player = { workspace = true }
 rmh-scraper = { workspace = true }
 rmh-torrent = { workspace = true }
 rmh-trakt = { workspace = true }
+rmh-services = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = "0.10"
 uuid = { workspace = true }
 dirs = { workspace = true }
 

@@ -86,6 +86,12 @@ pub struct Title {
     pub poster_path: Option<String>,
     pub backdrop_path: Option<String>,
     pub rating: Option<f32>,
+    #[serde(default)]
+    pub genre_ids: Vec<i32>,
+    #[serde(default)]
+    pub original_language: Option<String>,
+    #[serde(default)]
+    pub votes: Option<u32>,
 }
 
 impl Title {
@@ -95,7 +101,7 @@ impl Title {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct RawTitle {
+pub(crate) struct RawTitle {
     id: i32,
     media_type: Option<String>,
     title: Option<String>,
@@ -106,10 +112,14 @@ struct RawTitle {
     poster_path: Option<String>,
     backdrop_path: Option<String>,
     vote_average: Option<f32>,
+    #[serde(default)]
+    genre_ids: Vec<i32>,
+    original_language: Option<String>,
+    vote_count: Option<u32>,
 }
 
 impl RawTitle {
-    fn into_title(self, default: Option<Kind>) -> Option<Title> {
+    pub(crate) fn into_title(self, default: Option<Kind>) -> Option<Title> {
         let kind = match self.media_type.as_deref() {
             Some("movie") => Kind::Movie,
             Some("tv") => Kind::Tv,
@@ -126,13 +136,16 @@ impl RawTitle {
             poster_path: self.poster_path,
             backdrop_path: self.backdrop_path,
             rating: self.vote_average,
+            genre_ids: self.genre_ids,
+            original_language: self.original_language,
+            votes: self.vote_count,
         })
     }
 }
 
 #[derive(Debug, Deserialize)]
-struct Page<T> {
-    results: Vec<T>,
+pub(crate) struct Page<T> {
+    pub(crate) results: Vec<T>,
 }
 
 /// Full details for a movie or show
@@ -178,6 +191,8 @@ struct RawDetails {
     poster_path: Option<String>,
     backdrop_path: Option<String>,
     vote_average: Option<f32>,
+    vote_count: Option<u32>,
+    original_language: Option<String>,
     #[serde(default)]
     genres: Vec<crate::TmdbGenre>,
     runtime: Option<i32>,
@@ -246,9 +261,85 @@ struct FindResponse {
 }
 
 impl TmdbClient {
+    /// Responses are cached on disk when a cache dir is set: lists for a few
+    /// hours, details for days. A stale copy is used when TMDB is unreachable.
+    pub fn with_cache(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.cache_dir = Some(dir.into());
+        self
+    }
+
+    fn ttl_for(path: &str) -> std::time::Duration {
+        let h = |n: u64| std::time::Duration::from_secs(n * 3600);
+        if path.starts_with("/search") {
+            h(6)
+        } else if path.starts_with("/trending") || path.starts_with("/discover") || path.contains("/popular")
+            || path.contains("/now_playing") || path.contains("/upcoming") || path.contains("/on_the_air")
+            || path.contains("/airing_today") || path.contains("/top_rated")
+        {
+            h(4)
+        } else if path.starts_with("/genre") || path.starts_with("/watch/providers") || path.starts_with("/configuration") {
+            h(24 * 7)
+        } else {
+            h(48)
+        }
+    }
+
+    fn cache_file(&self, path: &str, params: &[(&str, &str)]) -> Option<std::path::PathBuf> {
+        let dir = self.cache_dir.as_ref()?;
+        let mut key = String::from(path);
+        for (k, v) in params {
+            key.push('&');
+            key.push_str(k);
+            key.push('=');
+            key.push_str(v);
+        }
+        let h = key.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+        Some(dir.join(format!("{h:016x}.json")))
+    }
+
     /// GET a TMDB v3 endpoint. Accepts a v3 API key or a v4 read access token.
-    async fn get_json<T: DeserializeOwned>(&self, path: &str, params: &[(&str, &str)]) -> Result<T> {
-        let mut req = self.client.get(format!("{TMDB_BASE_URL}{path}")).query(params).query(&[("language", "en-US")]);
+    pub(crate) async fn get_json<T: DeserializeOwned>(&self, path: &str, params: &[(&str, &str)]) -> Result<T> {
+        let cache = self.cache_file(path, params);
+        let fresh = cache.as_ref().and_then(|f| {
+            let age = std::fs::metadata(f).ok()?.modified().ok()?.elapsed().ok()?;
+            (age < Self::ttl_for(path)).then(|| std::fs::read(f).ok()).flatten()
+        });
+        if let Some(bytes) = fresh {
+            if let Ok(v) = serde_json::from_slice(&bytes) {
+                return Ok(v);
+            }
+        }
+        match self.fetch_bytes(path, params).await {
+            Ok(bytes) => {
+                let v = serde_json::from_slice(&bytes).with_context(|| format!("Bad TMDB response for {path}"))?;
+                if let Some(f) = &cache {
+                    if let Some(d) = f.parent() {
+                        let _ = std::fs::create_dir_all(d);
+                    }
+                    let tmp = f.with_extension("part");
+                    if std::fs::write(&tmp, &bytes).is_ok() {
+                        let _ = std::fs::rename(&tmp, f);
+                    }
+                }
+                Ok(v)
+            }
+            Err(e) => {
+                // offline: a stale cached copy beats an error
+                if let Some(bytes) = cache.as_ref().and_then(|f| std::fs::read(f).ok()) {
+                    if let Ok(v) = serde_json::from_slice(&bytes) {
+                        return Ok(v);
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    async fn fetch_bytes(&self, path: &str, params: &[(&str, &str)]) -> Result<Vec<u8>> {
+        let mut req = self.client.get(format!("{TMDB_BASE_URL}{path}")).query(params);
+        if !params.iter().any(|(k, _)| *k == "language") {
+            req = req.query(&[("language", "en-US")]);
+        }
         req = if self.api_key.starts_with("eyJ") {
             req.bearer_auth(&self.api_key)
         } else {
@@ -262,7 +353,7 @@ impl TmdbClient {
             }
             bail!("TMDB error {status} for {path}");
         }
-        resp.json().await.with_context(|| format!("Bad TMDB response for {path}"))
+        Ok(resp.bytes().await.context("TMDB read failed")?.to_vec())
     }
 
     /// Movies and shows matching a query, best first
@@ -314,6 +405,9 @@ impl TmdbClient {
                 poster_path: raw.poster_path,
                 backdrop_path: raw.backdrop_path,
                 rating: raw.vote_average,
+                genre_ids: raw.genres.iter().map(|g| g.id).collect(),
+                original_language: raw.original_language,
+                votes: raw.vote_count,
             },
             imdb_id: raw.imdb_id.or(raw.external_ids.and_then(|e| e.imdb_id)).filter(|i| !i.is_empty()),
             genres: raw.genres.into_iter().map(|g| g.name).collect(),
@@ -405,6 +499,9 @@ mod tests {
             poster_path: None,
             backdrop_path: None,
             rating: None,
+            genre_ids: vec![],
+            original_language: None,
+            votes: None,
         };
         let hits = vec![t(1, "Dark Shadows", Some(1966)), t(2, "Dark", Some(2017)), t(3, "Dark", Some(1990))];
         assert_eq!(best_match(hits.clone(), "Dark", None).unwrap().tmdb_id, 2);

@@ -95,6 +95,15 @@ pub(crate) struct Inner {
     /// Poster / still image cache
     pub(crate) image_dir: PathBuf,
     pub(crate) trakt_token_path: PathBuf,
+    /// Cached TMDB JSON responses
+    pub(crate) tmdb_cache: PathBuf,
+    /// Downloaded subtitles
+    pub(crate) subs_dir: PathBuf,
+    /// Local watchlist + Simkl / AniList tokens live next to the config
+    pub(crate) data_dir: PathBuf,
+    /// Every title TMDB has shown us (typo-tolerant search suggestions)
+    pub(crate) seen: RwLock<std::collections::HashMap<(rmh_metadata::Kind, i32), rmh_metadata::Title>>,
+    pub(crate) opensubtitles: RwLock<Option<Arc<rmh_services::opensubtitles::OpenSubtitles>>>,
 }
 
 /// Cloneable handle to the application services
@@ -131,6 +140,13 @@ impl MediaService {
         } else {
             base.join("trakt.json")
         };
+        let default_db = db_path == Database::default_path().unwrap_or_default();
+        let cache_base = image_dir.parent().map(Path::to_path_buf).unwrap_or(base.clone());
+        let data_dir = if default_db {
+            dirs::config_dir().map(|d| d.join("rustmediahub")).unwrap_or(base.clone())
+        } else {
+            base.clone()
+        };
         let http = reqwest::Client::builder()
             .user_agent(concat!("RustMediaHub/", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(30))
@@ -145,6 +161,11 @@ impl MediaService {
                 torrent: Arc::new(Mutex::new(None)),
                 trakt: RwLock::new(None),
                 http,
+                tmdb_cache: cache_base.join("tmdb"),
+                subs_dir: cache_base.join("subtitles"),
+                data_dir,
+                seen: RwLock::new(Default::default()),
+                opensubtitles: RwLock::new(None),
                 image_dir,
                 trakt_token_path,
             }),
@@ -207,6 +228,14 @@ impl MediaService {
         });
         if let Ok(mut t) = self.inner.trakt.write() {
             *t = trakt;
+        }
+        let os = cfg.opensubtitles_key().and_then(|key| {
+            rmh_services::opensubtitles::OpenSubtitles::new(key, cfg.opensubtitles_username.clone(), cfg.opensubtitles_password.clone())
+                .map(Arc::new)
+                .ok()
+        });
+        if let Ok(mut o) = self.inner.opensubtitles.write() {
+            *o = os;
         }
     }
 
