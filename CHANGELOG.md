@@ -5,6 +5,11 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+### Fixed
+- Release notes keep their section spacing
+### Changed
+- Settings → Updates shows when the last check ran
+
 ## [0.2.0] - 2026-11-17
 
 ### Added
@@ -15,6 +20,7 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 - Instant search (Ctrl+K), Browse with filters, person pages, trailers, similar titles, watchlist
 - Release calendar (Trakt / TMDB), OpenSubtitles, Simkl and AniList
 - In-app video with chapters, skip intro/credits, tracks, speed, autoplay next, Trakt sync
+
 ### Changed
 - The installed app reads API keys from `~/.config/rustmediahub/.env`
 - Services that aren't set up stay out of the way

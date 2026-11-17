@@ -60,7 +60,7 @@ PREV_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)
 NOTES=$(mktemp); trap 'rm -f "$NOTES"' EXIT
 [ -f CHANGELOG.md ] || printf '# Changelog\n\nAll notable changes to RustMediaHub. Versions follow [semver](https://semver.org).\n\n## [Unreleased]\n' >CHANGELOG.md
 # Unreleased section body (until the next "## " heading)
-awk '/^## \[Unreleased\]/{f=1;next} /^## /{f=0} f' CHANGELOG.md | sed '/^[[:space:]]*$/d' >"$NOTES" || true
+awk '/^## \[Unreleased\]/{f=1;next} /^## /{f=0} f' CHANGELOG.md | sed -e '/[^[:space:]]/,$!d' | sed -e ':a' -e '/^[[:space:]]*$/{$d;N;ba' -e '}' >"$NOTES" || true
 if [ ! -s "$NOTES" ]; then
     RANGE=${PREV_TAG:+$PREV_TAG..}HEAD
     git log --no-merges --pretty='- %s' "$RANGE" | grep -v '^- release: ' >"$NOTES" || true

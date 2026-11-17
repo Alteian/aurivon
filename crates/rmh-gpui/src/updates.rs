@@ -277,7 +277,14 @@ impl MediaHubView {
                     .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.update_config(|c| c.update_prereleases = !c.update_prereleases, false, cx))),
             )
             .child(buttons)
-            .when_some(u.message.clone(), |d, m| d.child(div().text_sm().text_color(rgb(p.muted)).child(m)))
+            .when_some(u.message.clone(), |d, m| {
+                let ago = u.last_check.map(|t| t.elapsed().as_secs() / 60).map(|m| match m {
+                    0 => " · checked just now".to_string(),
+                    1..=59 => format!(" · checked {m} min ago"),
+                    _ => format!(" · checked {} h ago", m / 60),
+                });
+                d.child(div().text_sm().text_color(rgb(p.muted)).child(format!("{m}{}", ago.unwrap_or_default())))
+            })
             .when_some(u.error.clone(), |d, e| d.child(div().text_sm().text_color(rgb(p.danger)).child(e)))
     }
 }
