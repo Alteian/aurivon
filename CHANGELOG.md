@@ -5,6 +5,9 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+### Changed
+- "What's new" lists the changes of every version since yours, not just the newest
+
 ## [0.3.2] - 2026-11-17
 
 ### Fixed

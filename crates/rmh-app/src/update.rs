@@ -190,6 +190,25 @@ fn pick_latest(releases: Vec<GhRelease>, include_pre: bool) -> Option<ReleaseInf
         .max_by(|a, b| a.version.cmp(&b.version))
 }
 
+/// Notes of every release newer than `current`, newest first, so skipping
+/// versions doesn't hide what changed in between
+fn combined_notes(releases: &[GhRelease], current: &Version, include_pre: bool) -> String {
+    let mut newer: Vec<(Version, &str)> = releases
+        .iter()
+        .filter(|r| !r.draft)
+        .filter_map(|r| {
+            let v = Version::parse(r.tag_name.trim_start_matches('v')).ok()?;
+            let pre = r.prerelease || !v.pre.is_empty();
+            (v > *current && (include_pre || !pre)).then(|| (v, r.body.as_deref().unwrap_or("")))
+        })
+        .collect();
+    newer.sort_by(|a, b| b.0.cmp(&a.0));
+    if newer.len() == 1 {
+        return newer[0].1.trim().to_string();
+    }
+    newer.iter().map(|(v, body)| format!("## {v}\n{}", body.trim())).collect::<Vec<_>>().join("\n\n")
+}
+
 /// Ask GitHub for the newest release and compare it with the running version
 pub async fn check(include_pre: bool) -> anyhow::Result<UpdateCheck> {
     let token = github_token();
@@ -206,10 +225,14 @@ pub async fn check(include_pre: bool) -> anyhow::Result<UpdateCheck> {
         s => anyhow::bail!("GitHub releases request failed: HTTP {s}"),
     }
     let releases: Vec<GhRelease> = resp.json().await?;
-    let latest = pick_latest(releases, include_pre);
     let current = current_version();
+    let notes = combined_notes(&releases, &current, include_pre);
+    let latest = pick_latest(releases, include_pre);
     Ok(match latest {
-        Some(r) if r.version > current => UpdateCheck::Available(r),
+        Some(mut r) if r.version > current => {
+            r.notes = notes;
+            UpdateCheck::Available(r)
+        }
         Some(r) => UpdateCheck::UpToDate { latest: Some(r.version.to_string()) },
         None => UpdateCheck::UpToDate { latest: None },
     })
@@ -414,6 +437,13 @@ mod tests {
         // a binary reporting the wrong version is rejected and current is untouched
         assert!(install_archive(root.path(), "9.9.10", &buf).is_err());
         assert_eq!(std::fs::read_link(root.path().join("current")).unwrap(), Path::new("versions/9.9.9"));
+    }
+
+    #[test]
+    fn notes_cover_every_skipped_release() {
+        let list = vec![rel("v0.2.0", false, true), rel("v0.2.1", false, true), rel("v0.3.0", false, true), rel("v0.4.0-beta.1", true, true)];
+        let n = combined_notes(&list, &Version::parse("0.2.0").unwrap(), false);
+        assert!(n.starts_with("## 0.3.0") && n.contains("## 0.2.1") && !n.contains("0.4.0") && !n.contains("## 0.2.0"));
     }
 
     #[test]
