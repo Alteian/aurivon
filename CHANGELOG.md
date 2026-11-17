@@ -5,6 +5,8 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-17
+
 ### Fixed
 - `aurivon --version`, `--check-update` and `--update` print their output when run from scripts too (only launcher starts go to the log)
 
