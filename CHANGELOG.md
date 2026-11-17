@@ -5,6 +5,8 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-17
+
 ### Added
 - Installable app: `make install` puts RustMediaHub in `~/.local` with an app-launcher entry (COSMIC, GNOME, KDE) and icons
 - Automatic updates from GitHub releases: check on startup and every 6 hours, changelog, sha256-verified install, restart prompt
@@ -16,3 +18,4 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 ### Changed
 - The installed app reads API keys from `~/.config/rustmediahub/.env`
 - Services that aren't set up stay out of the way
+
