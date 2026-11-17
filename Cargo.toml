@@ -20,9 +20,9 @@ members = [
 version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
-authors = ["RustMediaHub Team"]
+authors = ["Aurivon Team"]
 license = "MIT"
-repository = "https://github.com/Alteian/needmediacenter"
+repository = "https://github.com/Alteian/aurivon"
 
 [workspace.dependencies]
 # Async Runtime
@@ -86,7 +86,7 @@ rmh-app = { path = "crates/rmh-app" }
 rmh-gpui = { path = "crates/rmh-gpui" }
 
 [package]
-name = "rustmediahub"
+name = "aurivon"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -94,12 +94,12 @@ license.workspace = true
 description = "A lightweight, performant media center application"
 
 [[bin]]
-name = "rustmediahub"
+name = "aurivon"
 path = "src/main.rs"
 
-# Legacy iced UI: cargo run --features iced --bin rustmediahub-iced
+# Legacy iced UI: cargo run --features iced --bin aurivon-iced
 [[bin]]
-name = "rustmediahub-iced"
+name = "aurivon-iced"
 path = "src/iced_main.rs"
 required-features = ["iced"]
 

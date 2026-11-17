@@ -1,4 +1,4 @@
-//! Built-in addons for RustMediaHub
+//! Built-in addons for Aurivon
 
 mod local_files;
 

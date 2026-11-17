@@ -1,4 +1,4 @@
-//! Scraper addon for RustMediaHub
+//! Scraper addon for Aurivon
 //!
 //! This crate provides scraping capabilities to find streams from various sources:
 //! - Torrent sites (1337x, RARBG-style indexers, etc.)

@@ -1,4 +1,4 @@
-//! Core domain models for RustMediaHub
+//! Core domain models for Aurivon
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

@@ -1,4 +1,4 @@
-//! TMDB metadata fetching for RustMediaHub
+//! TMDB metadata fetching for Aurivon
 
 use anyhow::{Context, Result};
 use reqwest::Client;

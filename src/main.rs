@@ -1,29 +1,30 @@
-//! RustMediaHub - GPUI desktop front end (default).
+//! Aurivon - GPUI desktop front end (default).
 //!
-//! The legacy iced UI is still available: `cargo run --features iced --bin rustmediahub-iced`.
+//! The legacy iced UI is still available: `cargo run --features iced --bin aurivon-iced`.
 
 use rmh_app::update::{self, UpdateCheck};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-const HELP: &str = "RustMediaHub - media center
+const HELP: &str = "Aurivon - media center
 
-Usage: rustmediahub [options]
+Usage: aurivon [options]
 
   --search <query>   start with the search open
   --check-update     check GitHub releases for a newer version
   --update           download, verify and install the newest version
   --pre              with --check-update/--update: include pre-releases
+  --migrate          move files from the old rustmediahub folders and exit
   --version          print the version
   --help             this help
 
 API keys are read from the environment, ./.env (development) and
-~/.config/rustmediahub/.env (installed app), then Settings.";
+~/.config/aurivon/.env (installed app), then Settings.";
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let has = |f: &str| args.iter().any(|a| a == f);
     if has("--version") || has("-V") {
-        println!("rustmediahub {}", update::CURRENT_VERSION);
+        println!("aurivon {}", update::CURRENT_VERSION);
         return Ok(());
     }
     if has("--help") || has("-h") {
@@ -31,11 +32,23 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Aurivon used to be called RustMediaHub (briefly Lyrion): move old config/library/cache dirs
+    let migration = rmh_app::migrate::migrate_legacy_dirs();
+    if has("--migrate") {
+        for p in &migration.moved {
+            println!("moved {}", p.display());
+        }
+        for p in &migration.skipped {
+            println!("kept {} (already exists in the new location)", p.display());
+        }
+        return Ok(());
+    }
+
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,rmh_player=info"));
     tracing_subscriber::registry().with(filter).with(tracing_subscriber::fmt::layer()).init();
 
     // API keys: process env wins, then ./.env (dev checkout), then the user's
-    // ~/.config/rustmediahub/.env (installed app). Values are never logged.
+    // ~/.config/aurivon/.env (installed app). Values are never logged.
     let _ = dotenvy::dotenv();
     if let Some(path) = rmh_app::AppConfig::user_env_path().filter(|p| p.is_file()) {
         let _ = dotenvy::from_path(&path);
@@ -45,7 +58,10 @@ fn main() -> anyhow::Result<()> {
         return update_cli(has("--update"), has("--pre"));
     }
 
-    tracing::info!("Starting RustMediaHub {} (GPUI)", update::CURRENT_VERSION);
+    if !migration.moved.is_empty() {
+        tracing::info!("Moved {} item(s) from the old rustmediahub folders to aurivon", migration.moved.len());
+    }
+    tracing::info!("Starting Aurivon {} (GPUI)", update::CURRENT_VERSION);
     rmh_gpui::run().map_err(anyhow::Error::msg)
 }
 
@@ -63,12 +79,12 @@ fn update_cli(install: bool, pre: bool) -> anyhow::Result<()> {
                 println!("\n{}\n", rel.notes.trim());
             }
             if !install {
-                println!("Run `rustmediahub --update` to install it.");
+                println!("Run `aurivon --update` to install it.");
                 return Ok(());
             }
             let exe = update::cli::install(&rel)?;
             println!("Installed {} -> {}", rel.version, exe.display());
-            println!("Restart RustMediaHub to use the new version.");
+            println!("Restart Aurivon to use the new version.");
             Ok(())
         }
     }

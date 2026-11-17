@@ -1,11 +1,11 @@
-//! RustMediaHub - A lightweight, performant media center application
+//! Aurivon - A lightweight, performant media center application
 //!
 //! This is the main entry point that initializes logging, configuration,
 //! and launches the Iced GUI application.
 
 use anyhow::Result;
 use iced::Size;
-use rmh_ui::RustMediaHub;
+use rmh_ui::Aurivon;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -19,7 +19,7 @@ fn main() -> Result<()> {
         info!("RMH_EMBED_PLAYER=1: mpv will be embedded into the main window (X11 only)");
     }
 
-    info!("Starting RustMediaHub");
+    info!("Starting Aurivon");
 
     // Load environment variables from .env file (if present)
     if let Err(e) = dotenvy::dotenv() {
@@ -27,13 +27,13 @@ fn main() -> Result<()> {
     }
 
     // Run the Iced application
-    iced::application("RustMediaHub", RustMediaHub::update, RustMediaHub::view)
+    iced::application("Aurivon", Aurivon::update, Aurivon::view)
         .window_size(Size::new(1280.0, 800.0))
         .centered()
-        .subscription(RustMediaHub::subscription)
-        .run_with(RustMediaHub::new)?;
+        .subscription(Aurivon::subscription)
+        .run_with(Aurivon::new)?;
 
-    info!("RustMediaHub shutdown");
+    info!("Aurivon shutdown");
     Ok(())
 }
 

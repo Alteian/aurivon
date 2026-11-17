@@ -19,7 +19,7 @@ use tracing::info;
 use uuid::Uuid;
 
 /// Main application state
-pub struct RustMediaHub {
+pub struct Aurivon {
     /// Current view being displayed
     current_view: View,
     /// All libraries
@@ -188,7 +188,7 @@ pub struct ScrapedResultData {
     pub rd_cached: bool,
 }
 
-impl RustMediaHub {
+impl Aurivon {
     /// Create a new application instance
     pub fn new() -> (Self, Task<Message>) {
         let config = AppConfig::load().unwrap_or_else(|e| {
@@ -272,7 +272,7 @@ impl RustMediaHub {
 
     /// Handle application title
     pub fn title(&self) -> String {
-        "RustMediaHub".to_string()
+        "Aurivon".to_string()
     }
 
     /// Mark something as playing so the now-playing bar and polling start
@@ -327,7 +327,7 @@ impl RustMediaHub {
              #[cfg(target_os = "linux")]
              // We search for the window by title. This requires the window to be mapped.
              // On macOS/Windows, this might require different implementation.
-             if let Some(wid) = crate::window::find_window_by_title("RustMediaHub") {
+             if let Some(wid) = crate::window::find_window_by_title("Aurivon") {
                  info!("Found main window ID: {}", wid);
                  self.window_id = Some(wid);
                  
@@ -1226,7 +1226,7 @@ impl RustMediaHub {
 
         container(
             row![
-                text("RustMediaHub").size(24),
+                text("Aurivon").size(24),
                 horizontal_space(),
                 library_btn,
                 discover_btn,
@@ -1836,7 +1836,7 @@ impl RustMediaHub {
     }
 }
 
-impl Default for RustMediaHub {
+impl Default for Aurivon {
     fn default() -> Self {
         Self::new().0
     }
@@ -1871,7 +1871,7 @@ mod tests {
         ok.then_some(out)
     }
 
-    fn tick_until(app: &mut RustMediaHub, what: &str, f: impl Fn(&RustMediaHub) -> bool) {
+    fn tick_until(app: &mut Aurivon, what: &str, f: impl Fn(&Aurivon) -> bool) {
         let start = Instant::now();
         while !f(app) {
             assert!(start.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
@@ -1896,7 +1896,7 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
-        let (mut app, _) = RustMediaHub::new();
+        let (mut app, _) = Aurivon::new();
         app.player = Player::new(PlayerConfig { headless: true, hwdec: "no".into(), ..Default::default() });
 
         let item = MediaItem::from_scan(clip.to_string_lossy().into(), "Ui.Test.Clip.mp4".into(), 1);

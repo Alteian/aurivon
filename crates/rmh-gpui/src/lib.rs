@@ -1,4 +1,4 @@
-//! GPUI front end for RustMediaHub (same gpui-kit stack as Kalyreon).
+//! GPUI front end for Aurivon (same gpui-kit stack as Kalyreon).
 
 mod browse;
 mod calendar;
@@ -45,15 +45,15 @@ pub fn run() -> Result<(), String> {
         disc::bind_keys(cx);
 
         let options = WindowOptions {
-            titlebar: Some(TitlebarOptions { title: Some("RustMediaHub".into()), ..Default::default() }),
+            titlebar: Some(TitlebarOptions { title: Some("Aurivon".into()), ..Default::default() }),
             window_bounds: Some(WindowBounds::centered(size(px(1440.0), px(900.0)), cx)),
             window_min_size: Some(size(px(1024.0), px(680.0))),
-            app_id: Some("rustmediahub".to_string()), // matches rustmediahub.desktop (launcher icon)
+            app_id: Some("aurivon".to_string()), // matches aurivon.desktop (launcher icon)
             ..Default::default()
         };
         let svc = svc.clone();
         gpui_kit::open_window(options, cx, move |window, cx| cx.new(|cx| MediaHubView::new(svc, window, cx)))
-            .expect("failed to open RustMediaHub window");
+            .expect("failed to open Aurivon window");
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();

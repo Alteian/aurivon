@@ -1,4 +1,4 @@
-//! Core types and shared utilities for RustMediaHub
+//! Core types and shared utilities for Aurivon
 
 pub mod error;
 pub mod models;

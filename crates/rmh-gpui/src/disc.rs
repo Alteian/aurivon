@@ -230,7 +230,7 @@ impl Disc {
             let ph = ph.to_string();
             cx.new(move |cx| InputState::new(window, cx).placeholder(ph).masked(masked).default_value(val))
         };
-        // `rustmediahub --search "dune"` opens the app with the search overlay
+        // `aurivon --search "dune"` opens the app with the search overlay
         let initial = cli_search();
         let search_input = input(cx, window, "Search movies, series, people and your library…", initial.clone().unwrap_or_default(), false);
         let inputs = SocialInputs {

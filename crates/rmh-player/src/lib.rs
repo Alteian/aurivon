@@ -472,7 +472,7 @@ impl MpvSession {
             // OSC: chapter marks on the seek bar, idle logo off, hide quickly
             "--script-opts=osc-seekbarstyle=bar,osc-hidetimeout=1200,osc-idlescreen=no,osc-deadzonesize=0.2".to_string(),
             "--input-default-bindings=yes".to_string(),
-            "--title=RustMediaHub Player - ${media-title}".to_string(),
+            "--title=Aurivon Player - ${media-title}".to_string(),
             "--no-terminal".to_string(),
         ];
         if config.headless {

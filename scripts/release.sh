@@ -16,8 +16,10 @@
 # Releases should normally be cut from master after the PRs are merged.
 set -euo pipefail
 
-REPO_SLUG="Alteian/needmediacenter"
 cd "$(dirname "$0")/.."
+# single source of truth for the release repository: rmh_app::update::REPO
+REPO_SLUG=$(sed -n 's/^pub const REPO: &str = "\(.*\)";/\1/p' crates/rmh-app/src/update.rs)
+[ -n "$REPO_SLUG" ] || { echo "could not read REPO from crates/rmh-app/src/update.rs" >&2; exit 1; }
 
 BUMP="${1:-}"; shift || true
 PRE=""; SKIP_TESTS=0; DRY=0
@@ -58,7 +60,7 @@ echo "Releasing $CUR -> $NEW ($TAG) from $BRANCH"
 
 PREV_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)
 NOTES=$(mktemp); trap 'rm -f "$NOTES"' EXIT
-[ -f CHANGELOG.md ] || printf '# Changelog\n\nAll notable changes to RustMediaHub. Versions follow [semver](https://semver.org).\n\n## [Unreleased]\n' >CHANGELOG.md
+[ -f CHANGELOG.md ] || printf '# Changelog\n\nAll notable changes to Aurivon. Versions follow [semver](https://semver.org).\n\n## [Unreleased]\n' >CHANGELOG.md
 # Unreleased section body (until the next "## " heading)
 awk '/^## \[Unreleased\]/{f=1;next} /^## /{f=0} f' CHANGELOG.md | sed -e '/[^[:space:]]/,$!d' | sed -e ':a' -e '/^[[:space:]]*$/{$d;N;ba' -e '}' >"$NOTES" || true
 if [ ! -s "$NOTES" ]; then
@@ -91,7 +93,7 @@ SUMFILE="$TARBALL.sha256"
 
 git add Cargo.toml Cargo.lock CHANGELOG.md
 git commit -q -m "release: $TAG"
-git tag -a "$TAG" -m "RustMediaHub $NEW"
+git tag -a "$TAG" -m "Aurivon $NEW"
 trap - ERR
 git push -q origin "HEAD:refs/heads/$BRANCH"
 git push -q origin "$TAG"
@@ -99,7 +101,7 @@ git push -q origin "$TAG"
 PRE_FLAG=(); [[ "$NEW" == *-* ]] && PRE_FLAG=(--prerelease)
 gh release create "$TAG" "$TARBALL" "$SUMFILE" \
     --repo "$REPO_SLUG" \
-    --title "RustMediaHub $NEW" \
+    --title "Aurivon $NEW" \
     --notes-file "$NOTES" \
     --verify-tag "${PRE_FLAG[@]}"
 echo "Released $TAG: $(gh release view "$TAG" --repo "$REPO_SLUG" --json url -q .url)"

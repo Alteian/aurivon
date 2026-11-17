@@ -1,6 +1,6 @@
 [package]
 name = "rmh-services"
-description = "OpenSubtitles, Simkl and AniList integrations for RustMediaHub"
+description = "OpenSubtitles, Simkl and AniList integrations for Aurivon"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

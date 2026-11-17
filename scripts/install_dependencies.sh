@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "Installing dependencies for RustMediaHub..."
+echo "Installing dependencies for Aurivon..."
 
 if [ -f /etc/os-release ]; then
     . /etc/os-release

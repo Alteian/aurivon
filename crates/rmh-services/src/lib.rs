@@ -16,7 +16,7 @@ pub use store::Secret;
 
 pub(crate) fn http() -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
-        .user_agent(concat!("RustMediaHub v", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("Aurivon v", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(30))
         .build()?)
 }

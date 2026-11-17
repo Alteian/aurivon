@@ -1,6 +1,6 @@
 [package]
 name = "rmh-ui"
-description = "Iced-based native GUI for RustMediaHub"
+description = "Iced-based native GUI for Aurivon"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

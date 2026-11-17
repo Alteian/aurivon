@@ -1,6 +1,6 @@
 [package]
 name = "rmh-metadata"
-description = "TMDB metadata fetching for RustMediaHub"
+description = "TMDB metadata fetching for Aurivon"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -86,7 +86,7 @@ impl MediaHubView {
     /// A: Continue Watching + Up Next
     fn home_focus(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
         if self.entries.is_empty() && !self.trakt.logged_in {
-            return self.empty_state("Welcome to RustMediaHub", "Add a folder with movies, shows or music to get started.", p, cx);
+            return self.empty_state("Welcome to Aurivon", "Add a folder with movies, shows or music to get started.", p, cx);
         }
         let cont = self.continue_entries();
         let next = up_next(&self.entries);

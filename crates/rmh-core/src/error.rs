@@ -1,4 +1,4 @@
-//! Core error types for RustMediaHub
+//! Core error types for Aurivon
 
 use thiserror::Error;
 

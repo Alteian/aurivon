@@ -1441,7 +1441,7 @@ impl MediaHubView {
             Ok(()) => {
                 let wid = self.video.as_ref().map(|v| v.xid());
                 self.player.set_config(Self::player_config(&self.svc, wid, self.volume));
-                self.status = Some(if restart_hint { "Saved, restart RustMediaHub to apply" } else { "Saved" }.into());
+                self.status = Some(if restart_hint { "Saved, restart Aurivon to apply" } else { "Saved" }.into());
             }
             Err(e) => self.error = Some(e),
         }

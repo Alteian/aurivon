@@ -1,4 +1,4 @@
-//! Torrent streaming engine for RustMediaHub
+//! Torrent streaming engine for Aurivon
 //!
 //! This crate provides Stremio-like torrent streaming capabilities:
 //! - Sequential piece downloading for instant playback

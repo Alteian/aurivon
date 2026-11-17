@@ -4,7 +4,7 @@
 //!   [`TraktClient::start_device_login`] → show `user_code` + `verification_url`
 //!   → [`TraktClient::poll_device_login`] until approved.
 //! - Tokens are refreshed automatically and stored in
-//!   `~/.config/rustmediahub/trakt.json` (mode 0600). Secrets are never logged.
+//!   `~/.config/aurivon/trakt.json` (mode 0600). Secrets are never logged.
 //! - Scrobbling (`/scrobble/start|pause|stop`), watched history, playback
 //!   progress and watchlist.
 //!
@@ -49,7 +49,7 @@ impl TraktToken {
         chrono::Utc::now().timestamp() > self.expires_at() - 24 * 3600
     }
     pub fn default_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("rustmediahub").join("trakt.json"))
+        dirs::config_dir().map(|d| d.join("aurivon").join("trakt.json"))
     }
     pub fn load(path: &PathBuf) -> Option<Self> {
         serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
@@ -262,7 +262,7 @@ pub struct TraktClient {
 impl TraktClient {
     pub fn new(client_id: impl Into<String>, client_secret: impl Into<String>, token_path: PathBuf) -> Result<Self> {
         let http = reqwest::Client::builder()
-            .user_agent(concat!("RustMediaHub/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("Aurivon/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(20))
             .build()?;
         let token = TraktToken::load(&token_path);

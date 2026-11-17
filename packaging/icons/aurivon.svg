@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4338ca"/>
+      <stop offset="0.55" stop-color="#7c3aed"/>
+      <stop offset="1" stop-color="#c026d3"/>
+    </linearGradient>
+    <linearGradient id="gold" gradientUnits="userSpaceOnUse" x1="0" y1="200" x2="0" y2="830">
+      <stop offset="0" stop-color="#fff3c4"/>
+      <stop offset="0.5" stop-color="#fcd34d"/>
+      <stop offset="1" stop-color="#f59e0b"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.35" r="0.6">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="56" y="56" width="912" height="912" rx="230" fill="url(#bg)"/>
+  <rect x="56" y="56" width="912" height="912" rx="230" fill="url(#glow)"/>
+  <!-- strings -->
+  <g stroke="#fff7dc" stroke-width="14" stroke-linecap="round" opacity="0.9">
+    <line x1="442" y1="352" x2="442" y2="735"/>
+    <line x1="512" y1="352" x2="512" y2="735"/>
+    <line x1="582" y1="352" x2="582" y2="735"/>
+  </g>
+  <!-- arms + sound box -->
+  <path d="M 262 222
+           C 330 230 352 290 336 380
+           C 318 480 300 560 340 650
+           C 380 740 450 770 512 770
+           C 574 770 644 740 684 650
+           C 724 560 706 480 688 380
+           C 672 290 694 230 762 222"
+        fill="none" stroke="url(#gold)" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- yoke -->
+  <line x1="318" y1="340" x2="706" y2="340" stroke="url(#gold)" stroke-width="44" stroke-linecap="round"/>
+  <!-- base -->
+  <path d="M 412 800 L 612 800" stroke="url(#gold)" stroke-width="44" stroke-linecap="round"/>
+</svg>

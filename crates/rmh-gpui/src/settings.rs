@@ -196,7 +196,7 @@ impl MediaHubView {
                     .flex()
                     .gap_4()
                     .child(div().flex_1().child(self.field("Client id", "From your Trakt API app", &self.trakt_id_input, p)))
-                    .child(div().flex_1().child(self.field("Client secret", "Stored in ~/.config/rustmediahub (0600)", &self.trakt_secret_input, p))),
+                    .child(div().flex_1().child(self.field("Client secret", "Stored in ~/.config/aurivon (0600)", &self.trakt_secret_input, p))),
             )
             .when_some(self.trakt_code.clone(), |d, code| {
                 d.child(

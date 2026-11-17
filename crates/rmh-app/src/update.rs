@@ -1,17 +1,17 @@
 //! Self-update from GitHub releases, versioned with semver.
 //!
 //! Releases are made by `scripts/release.sh` and carry two assets per platform:
-//! `rustmediahub-<version>-<arch>-linux.tar.gz` and a matching `.sha256`.
+//! `aurivon-<version>-<arch>-linux.tar.gz` and a matching `.sha256`.
 //! The repository is private, so requests are authenticated with a GitHub token
 //! taken (in order) from `RMH_GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN`,
-//! `~/.config/rustmediahub/github_token`, or `gh auth token`. Tokens are never
+//! `~/.config/aurivon/github_token`, or `gh auth token`. Tokens are never
 //! logged or stored by the app.
 //!
 //! Installed layout (see `scripts/install.sh`):
 //! ```text
-//! ~/.local/share/rustmediahub/app/versions/<version>/rustmediahub
-//! ~/.local/share/rustmediahub/app/current -> versions/<version>
-//! ~/.local/bin/rustmediahub            (launcher wrapper)
+//! ~/.local/share/aurivon/app/versions/<version>/aurivon
+//! ~/.local/share/aurivon/app/current -> versions/<version>
+//! ~/.local/bin/aurivon            (launcher wrapper)
 //! ```
 //! An update unpacks the new version next to the old one, checks it runs, and
 //! swaps the `current` symlink atomically, so a failed update never breaks the app.
@@ -24,7 +24,9 @@ use sha2::{Digest, Sha256};
 
 use crate::service::{MediaService, ServiceResult};
 
-pub const REPO: &str = "Alteian/needmediacenter";
+/// GitHub repository the releases are published to. This is the only place to
+/// change when the repository is renamed (scripts/release.sh reads it from here).
+pub const REPO: &str = "Alteian/aurivon";
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// A release newer than the running version
@@ -54,13 +56,13 @@ pub fn current_version() -> Version {
     Version::parse(CURRENT_VERSION).expect("crate version is semver")
 }
 
-/// `~/.local/share/rustmediahub/app` (the library database lives one level up)
+/// `~/.local/share/aurivon/app` (the library database lives one level up)
 pub fn install_root() -> Option<PathBuf> {
-    dirs::data_dir().map(|d| d.join("rustmediahub").join("app"))
+    dirs::data_dir().map(|d| d.join("aurivon").join("app"))
 }
 
 /// The install root when this process runs from an installed copy
-/// (`<root>/versions/<v>/rustmediahub`), `None` for dev builds
+/// (`<root>/versions/<v>/aurivon`), `None` for dev builds
 pub fn installed_root() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
     let root = install_root()?.canonicalize().ok()?;
@@ -68,13 +70,13 @@ pub fn installed_root() -> Option<PathBuf> {
     (versions.file_name()? == "versions" && versions.parent()? == root).then_some(root)
 }
 
-/// The launcher wrapper (`~/.local/bin/rustmediahub`) or the installed binary
+/// The launcher wrapper (`~/.local/bin/aurivon`) or the installed binary
 pub fn launcher_path() -> Option<PathBuf> {
-    let wrapper = dirs::home_dir()?.join(".local/bin/rustmediahub");
+    let wrapper = dirs::home_dir()?.join(".local/bin/aurivon");
     if wrapper.exists() {
         return Some(wrapper);
     }
-    installed_root().map(|r| r.join("current").join("rustmediahub"))
+    installed_root().map(|r| r.join("current").join("aurivon"))
 }
 
 fn arch() -> &'static str {
@@ -82,7 +84,7 @@ fn arch() -> &'static str {
 }
 
 pub fn asset_name(version: &Version) -> String {
-    format!("rustmediahub-{version}-{}-linux.tar.gz", arch())
+    format!("aurivon-{version}-{}-linux.tar.gz", arch())
 }
 
 /// A GitHub token for the private release repo; never logged
@@ -94,7 +96,7 @@ fn github_token() -> Option<String> {
             }
         }
     }
-    if let Some(path) = dirs::config_dir().map(|d| d.join("rustmediahub").join("github_token")) {
+    if let Some(path) = dirs::config_dir().map(|d| d.join("aurivon").join("github_token")) {
         if let Ok(t) = std::fs::read_to_string(path) {
             if !t.trim().is_empty() {
                 return Some(t.trim().to_string());
@@ -119,7 +121,7 @@ fn github_token() -> Option<String> {
 
 fn client() -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
-        .user_agent(concat!("RustMediaHub/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("Aurivon/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(300))
         .connect_timeout(std::time::Duration::from_secs(15))
         .build()?)
@@ -198,7 +200,7 @@ pub async fn check(include_pre: bool) -> anyhow::Result<UpdateCheck> {
     match resp.status().as_u16() {
         200 => {}
         401 | 403 | 404 if token.is_none() => anyhow::bail!(
-            "The release repository is private: sign in with `gh auth login` or put a GitHub token in ~/.config/rustmediahub/github_token"
+            "The release repository is private: sign in with `gh auth login` or put a GitHub token in ~/.config/aurivon/github_token"
         ),
         401 => anyhow::bail!("GitHub rejected the token (401): run `gh auth login` again"),
         s => anyhow::bail!("GitHub releases request failed: HTTP {s}"),
@@ -249,7 +251,7 @@ pub async fn install(rel: &ReleaseInfo) -> anyhow::Result<PathBuf> {
     let version = rel.version.to_string();
     let root2 = root.clone();
     tokio::task::spawn_blocking(move || install_archive(&root2, &version, &data)).await??;
-    Ok(root.join("current").join("rustmediahub"))
+    Ok(root.join("current").join("aurivon"))
 }
 
 /// Unpack a verified tarball as `<root>/versions/<version>` and activate it
@@ -263,10 +265,10 @@ pub fn install_archive(root: &Path, version: &str, tarball: &[u8]) -> anyhow::Re
         let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(tarball));
         // `unpack` refuses entries that would escape the target directory
         archive.unpack(&staging)?;
-        let dir = staging.join(format!("rustmediahub-{version}"));
-        let exe = dir.join("rustmediahub");
+        let dir = staging.join(format!("aurivon-{version}"));
+        let exe = dir.join("aurivon");
         if !exe.is_file() {
-            anyhow::bail!("archive does not contain rustmediahub-{version}/rustmediahub");
+            anyhow::bail!("archive does not contain aurivon-{version}/aurivon");
         }
         // the new binary must run and report the expected version
         let out = Command::new(&exe).arg("--version").output()?;
@@ -397,18 +399,18 @@ mod tests {
         {
             let enc = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::fast());
             let mut tar = tar::Builder::new(enc);
-            let script = b"#!/bin/sh\necho rustmediahub 9.9.9\n";
+            let script = b"#!/bin/sh\necho aurivon 9.9.9\n";
             let mut h = tar::Header::new_gnu();
             h.set_size(script.len() as u64);
             h.set_mode(0o755);
             h.set_cksum();
-            tar.append_data(&mut h, "rustmediahub-9.9.9/rustmediahub", &script[..]).unwrap();
+            tar.append_data(&mut h, "aurivon-9.9.9/aurivon", &script[..]).unwrap();
             tar.into_inner().unwrap().finish().unwrap();
         }
         install_archive(root.path(), "9.9.9", &buf).unwrap();
         let link = std::fs::read_link(root.path().join("current")).unwrap();
         assert_eq!(link, Path::new("versions/9.9.9"));
-        assert!(root.path().join("current/rustmediahub").is_file());
+        assert!(root.path().join("current/aurivon").is_file());
         // a binary reporting the wrong version is rejected and current is untouched
         assert!(install_archive(root.path(), "9.9.10", &buf).is_err());
         assert_eq!(std::fs::read_link(root.path().join("current")).unwrap(), Path::new("versions/9.9.9"));

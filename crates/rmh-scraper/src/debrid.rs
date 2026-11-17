@@ -53,7 +53,7 @@ pub struct RealDebrid {
 impl RealDebrid {
     pub fn new(config: RealDebridConfig) -> Self {
         let client = Client::builder()
-            .user_agent("RustMediaHub/0.1.0")
+            .user_agent("Aurivon/0.1.0")
             .build()
             .expect("Failed to create HTTP client");
 

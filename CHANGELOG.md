@@ -1,14 +1,18 @@
 # Changelog
 
-All notable changes to RustMediaHub. Versions follow [semver](https://semver.org):
+All notable changes to Aurivon. Versions follow [semver](https://semver.org):
 MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+### Changed
+- RustMediaHub is now **Aurivon**: `aurivon` command, "Aurivon" in the app launcher, new lyre-inspired icon
+- Settings, keys, library and caches move automatically from the old `rustmediahub` folders to `aurivon`; the old install is replaced
+- Releases are published to github.com/Alteian/aurivon (the repository was renamed)
+- Settings → Updates shows when the last check ran
+
 ### Fixed
 - Release notes keep their section spacing
-### Changed
-- Settings → Updates shows when the last check ran
 
 ## [0.2.0] - 2026-11-17
 

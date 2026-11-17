@@ -1,4 +1,4 @@
-//! Scraper addon for RustMediaHub
+//! Scraper addon for Aurivon
 //!
 //! This addon scrapes torrents from various sources and resolves them
 //! through Real-Debrid for instant cached streaming.

@@ -1,6 +1,6 @@
 [package]
 name = "rmh-torrent"
-description = "Torrent streaming engine for RustMediaHub - sequential downloading for instant playback"
+description = "Torrent streaming engine for Aurivon - sequential downloading for instant playback"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

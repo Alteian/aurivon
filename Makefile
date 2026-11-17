@@ -16,7 +16,7 @@ check:
 test:
 	cargo test --workspace
 
-# dist/rustmediahub-<version>-<arch>-linux.tar.gz + .sha256
+# dist/aurivon-<version>-<arch>-linux.tar.gz + .sha256
 package:
 	./scripts/package.sh
 

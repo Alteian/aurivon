@@ -1,4 +1,4 @@
-//! Iced-based native GUI for RustMediaHub
+//! Iced-based native GUI for Aurivon
 
 pub mod app;
 pub mod config;
@@ -7,5 +7,5 @@ pub mod style;
 pub mod views;
 pub mod window;
 
-pub use app::RustMediaHub;
+pub use app::Aurivon;
 

@@ -36,7 +36,7 @@ impl Default for TorrentEngineConfig {
     fn default() -> Self {
         let download_dir = dirs::cache_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("rustmediahub")
+            .join("aurivon")
             .join("torrents");
 
         Self {

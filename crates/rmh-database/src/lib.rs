@@ -1,4 +1,4 @@
-//! Database layer for RustMediaHub using SQLx + SQLite
+//! Database layer for Aurivon using SQLx + SQLite
 
 pub mod migrations;
 pub mod repository;
@@ -61,7 +61,7 @@ impl Database {
     pub fn default_path() -> Result<std::path::PathBuf> {
         let data_dir = dirs::data_local_dir()
             .context("Could not determine local data directory")?;
-        Ok(data_dir.join("rustmediahub").join("library.db"))
+        Ok(data_dir.join("aurivon").join("library.db"))
     }
 }
 

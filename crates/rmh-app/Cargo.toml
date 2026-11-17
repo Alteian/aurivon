@@ -1,6 +1,6 @@
 [package]
 name = "rmh-app"
-description = "UI-agnostic application services for RustMediaHub (library, playback session, discover)"
+description = "UI-agnostic application services for Aurivon (library, playback session, discover)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

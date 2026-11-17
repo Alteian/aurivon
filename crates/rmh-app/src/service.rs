@@ -131,7 +131,7 @@ impl MediaService {
             .build()?;
         let base = db_path.parent().map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir);
         let image_dir = if db_path == Database::default_path().unwrap_or_default() {
-            dirs::cache_dir().unwrap_or(base.clone()).join("rustmediahub").join("images")
+            dirs::cache_dir().unwrap_or(base.clone()).join("aurivon").join("images")
         } else {
             base.join("images")
         };
@@ -143,12 +143,12 @@ impl MediaService {
         let default_db = db_path == Database::default_path().unwrap_or_default();
         let cache_base = image_dir.parent().map(Path::to_path_buf).unwrap_or(base.clone());
         let data_dir = if default_db {
-            dirs::config_dir().map(|d| d.join("rustmediahub")).unwrap_or(base.clone())
+            dirs::config_dir().map(|d| d.join("aurivon")).unwrap_or(base.clone())
         } else {
             base.clone()
         };
         let http = reqwest::Client::builder()
-            .user_agent(concat!("RustMediaHub/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("Aurivon/", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
         let svc = Self {

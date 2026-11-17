@@ -18,9 +18,9 @@ impl Secret {
         Self { path: path.into() }
     }
 
-    /// ~/.config/rustmediahub/<name>.json
+    /// ~/.config/aurivon/<name>.json
     pub fn default_path(name: &str) -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("rustmediahub").join(format!("{name}.json")))
+        dirs::config_dir().map(|d| d.join("aurivon").join(format!("{name}.json")))
     }
 
     pub fn load<T: DeserializeOwned>(&self) -> Option<T> {

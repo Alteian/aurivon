@@ -1,4 +1,4 @@
-//! Torrent streaming addon for RustMediaHub
+//! Torrent streaming addon for Aurivon
 //!
 //! This addon provides stream resolution for magnet links and torrent files.
 

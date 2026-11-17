@@ -1,6 +1,6 @@
 [package]
 name = "rmh-scraper"
-description = "Scraper addon for RustMediaHub - finds streams from various sources with Real-Debrid support"
+description = "Scraper addon for Aurivon - finds streams from various sources with Real-Debrid support"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

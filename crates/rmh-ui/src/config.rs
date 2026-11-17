@@ -63,6 +63,6 @@ impl AppConfig {
         let config_dir = dirs::config_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?;
         
-        Ok(config_dir.join("rustmediahub").join("config.json"))
+        Ok(config_dir.join("aurivon").join("config.json"))
     }
 }

@@ -1,4 +1,4 @@
-//! UI-agnostic application layer for RustMediaHub.
+//! UI-agnostic application layer for Aurivon.
 //!
 //! Front ends (GPUI today, iced legacy) only deal with this crate and
 //! `rmh-player`: they render state and forward user intent. All I/O (SQLite,
@@ -17,6 +17,7 @@ pub mod service;
 pub mod session;
 pub mod trakt;
 pub mod update;
+pub mod migrate;
 
 pub use catalog::{next_episode, up_next, LibraryEntry, SeasonSummary, TitleCard, TitleKind};
 pub use calendar::{month_grid, CalendarItem, CalendarMonth, ReleaseKind};

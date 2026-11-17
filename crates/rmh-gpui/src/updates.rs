@@ -134,7 +134,7 @@ impl MediaHubView {
         match update::spawn_restart() {
             Ok(()) => cx.quit(),
             Err(e) => {
-                self.upd.error = Some(format!("Restart failed: {e:#}. Start RustMediaHub again from the launcher."));
+                self.upd.error = Some(format!("Restart failed: {e:#}. Start Aurivon again from the launcher."));
                 cx.notify();
             }
         }
@@ -149,7 +149,7 @@ impl MediaHubView {
         let rel = u.available.as_ref()?;
         let installed = u.installed.is_some();
         let title = if installed {
-            format!("RustMediaHub {} is installed", rel.version)
+            format!("Aurivon {} is installed", rel.version)
         } else if u.installing {
             format!("Installing {}…", rel.version)
         } else {
@@ -263,7 +263,7 @@ impl MediaHubView {
                     .text_sm()
                     .text_color(rgb(p.muted))
                     .child(format!(
-                        "RustMediaHub {} · {}",
+                        "Aurivon {} · {}",
                         update::CURRENT_VERSION,
                         if installed { "installed in ~/.local" } else { "development build (updates install only into an installed copy)" }
                     )),

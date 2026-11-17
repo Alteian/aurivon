@@ -1,4 +1,4 @@
-//! Addon/Plugin system for RustMediaHub
+//! Addon/Plugin system for Aurivon
 //! 
 //! This module provides a Stremio-compatible addon architecture that allows
 //! extending the media center with custom content sources, metadata providers,

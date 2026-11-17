@@ -1,4 +1,4 @@
-//! Persistent user configuration (`~/.config/rustmediahub/config.json`).
+//! Persistent user configuration (`~/.config/aurivon/config.json`).
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -295,13 +295,13 @@ impl AppConfig {
         self.mpv_path.clone().filter(|p| !p.trim().is_empty()).unwrap_or_else(|| "mpv".to_string())
     }
 
-    /// `~/.config/rustmediahub/.env`: API keys for the installed app (chmod 600)
+    /// `~/.config/aurivon/.env`: API keys for the installed app (chmod 600)
     pub fn user_env_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("rustmediahub").join(".env"))
+        dirs::config_dir().map(|d| d.join("aurivon").join(".env"))
     }
 
     pub fn config_path() -> Result<PathBuf> {
         let config_dir = dirs::config_dir().context("Could not determine config directory")?;
-        Ok(config_dir.join("rustmediahub").join("config.json"))
+        Ok(config_dir.join("aurivon").join("config.json"))
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "rmh-database"
-description = "Database layer for RustMediaHub using SQLx + SQLite"
+description = "Database layer for Aurivon using SQLx + SQLite"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

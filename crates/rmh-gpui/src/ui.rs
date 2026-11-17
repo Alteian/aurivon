@@ -460,7 +460,7 @@ impl MediaHubView {
                         div()
                             .flex()
                             .flex_col()
-                            .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("RustMediaHub"))
+                            .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("Aurivon"))
                             .child(div().text_xs().text_color(rgb(p.muted)).child("Media center")),
                     ),
             )

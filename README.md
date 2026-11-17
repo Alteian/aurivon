@@ -1,4 +1,4 @@
-# RustMediaHub
+# Aurivon
 
 A lightweight, high-performance media center application built entirely in Rust. Designed as a modern, extensible alternative to Stremio and Kodi.
 
@@ -23,7 +23,7 @@ A lightweight, high-performance media center application built entirely in Rust.
 ## Architecture
 
 ```
-rustmediahub/
+aurivon/
 ├── src/                    # Main application entry point
 ├── crates/
 │   ├── rmh-core/          # Core types, models, error handling
@@ -50,7 +50,7 @@ front end (e.g. GPUI) can be dropped in by replacing `rmh-ui`.
 
 ## Addon System
 
-RustMediaHub features a Stremio-compatible addon architecture for extensibility:
+Aurivon features a Stremio-compatible addon architecture for extensibility:
 
 ### Addon Types
 
@@ -157,8 +157,8 @@ rustup update
 
 ```bash
 # Clone the repository
-git clone https://github.com/Alteian/needmediacenter.git
-cd needmediacenter
+git clone git@github.com:Alteian/aurivon.git
+cd aurivon
 
 # Build in debug mode
 cargo build
@@ -172,7 +172,7 @@ RUST_LOG=debug cargo run
 ```bash
 cargo build --release
 
-# Binary will be at: target/release/rustmediahub
+# Binary will be at: target/release/aurivon
 ```
 
 ## Configuration
@@ -196,9 +196,9 @@ export TMDB_API_KEY=your_api_key_here
 
 Application data is stored in:
 
-- **Linux:** `~/.local/share/rustmediahub/`
-- **macOS:** `~/Library/Application Support/rustmediahub/`
-- **Windows:** `%LOCALAPPDATA%\rustmediahub\`
+- **Linux:** `~/.local/share/aurivon/`
+- **macOS:** `~/Library/Application Support/aurivon/`
+- **Windows:** `%LOCALAPPDATA%\aurivon\`
 
 ## Install & updates
 
@@ -208,14 +208,16 @@ make uninstall      # remove (library/settings kept; scripts/uninstall.sh --purg
 ```
 
 - The app appears in the app launcher (COSMIC launcher / app library, GNOME, KDE) as
-  **RustMediaHub**; from a terminal run `rustmediahub` (`~/.local/bin`).
-- Files: `~/.local/share/rustmediahub/app/versions/<version>` (+ `current` symlink),
-  launcher wrapper `~/.local/bin/rustmediahub`, `~/.local/share/applications/rustmediahub.desktop`,
-  icons in `~/.local/share/icons/hicolor`, log in `~/.local/state/rustmediahub/rustmediahub.log`.
-- API keys: the installed app reads `~/.config/rustmediahub/.env` (mode 0600).
+  **Aurivon**; from a terminal run `aurivon` (`~/.local/bin`).
+- Files: `~/.local/share/aurivon/app/versions/<version>` (+ `current` symlink),
+  launcher wrapper `~/.local/bin/aurivon`, `~/.local/share/applications/aurivon.desktop`,
+  icons in `~/.local/share/icons/hicolor`, log in `~/.local/state/aurivon/aurivon.log`.
+- API keys: the installed app reads `~/.config/aurivon/.env` (mode 0600).
   `make install` copies `TMDB_API_KEY` and `REAL_DEBRID_API_KEY` there from the repo `.env`
   the first time; Settings can override them. Other services are optional.
 - On Wayland the launcher runs the app through XWayland so video stays embedded.
+- Renamed from RustMediaHub: the first start (or `make install`) moves settings, keys, library
+  and caches from the old `rustmediahub` folders to `aurivon` and removes the old launcher entry.
 
 **Updates.** Releases are GitHub releases tagged `vMAJOR.MINOR.PATCH` with a tarball and
 its sha256. The app checks on startup and every 6 hours (Settings → Updates), shows
@@ -224,14 +226,14 @@ version next to the old one, switches atomically and offers a restart. Pre-relea
 (`0.3.0-beta.1`) are only offered when opted in. From a terminal:
 
 ```bash
-rustmediahub --version
-rustmediahub --check-update     # add --pre to include pre-releases
-rustmediahub --update
+aurivon --version
+aurivon --check-update     # add --pre to include pre-releases
+aurivon --update
 ```
 
 The repository is private, so the updater authenticates with your GitHub login:
 `gh auth token` (be logged in with `gh auth login`), or a token in
-`RMH_GITHUB_TOKEN` / `~/.config/rustmediahub/github_token`. No token is stored by the app.
+`RMH_GITHUB_TOKEN` / `~/.config/aurivon/github_token`. No token is stored by the app.
 
 **Releasing.** From a clean tree (normally on `master`):
 
@@ -244,7 +246,7 @@ scripts/release.sh minor --pre beta # 0.3.0-beta.1 (pre-release)
 
 It bumps the version in `Cargo.toml`, moves the *Unreleased* notes in `CHANGELOG.md`
 into the new version (or uses commit subjects), runs the tests, builds and packages
-`dist/rustmediahub-<v>-x86_64-linux.tar.gz` + `.sha256`, commits, tags, pushes and runs
+`dist/aurivon-<v>-x86_64-linux.tar.gz` + `.sha256`, commits, tags, pushes and runs
 `gh release create`. Installed apps pick it up on their next check.
 
 ## Usage
@@ -272,11 +274,11 @@ into the new version (or uses commit subjects), runs the tests, builds and packa
    Settings → Player → *Separate mpv window* restores the old standalone fullscreen window.
 
 5. **Find something:** `Ctrl+K` (or `/`) opens search from anywhere, `↑/↓` + `Enter`.
-   `rustmediahub --search "dune"` starts with the search open. **Browse** (`Ctrl+3`) has
+   `aurivon --search "dune"` starts with the search open. **Browse** (`Ctrl+3`) has
    filter panels (`F`), sort (`O`), movies/series (`V`), clear (`X`), more results (`L`).
    **Calendar** (`Ctrl+4`): `←/→/↑/↓` day, `PgUp/PgDn` month, `V` month/agenda, `M` mine,
    `Y` movies/series, `D` cinema/digital, `T` today, `R` refresh. Results are cached on disk
-   (`~/.cache/rustmediahub/{tmdb,calendar,images}`).
+   (`~/.cache/aurivon/{tmdb,calendar,images}`).
 
 6. **Home:** three layouts to compare (Settings → Home layout, the pills on Home, or `Ctrl+L`):
    **A** Continue watching + Up next, **B** Discover with a trending hero, **C** library grid.
@@ -297,7 +299,7 @@ into the new version (or uses commit subjects), runs the tests, builds and packa
 2. Paste its client id + secret in Settings → Services → Trakt (or set
    `TRAKT_CLIENT_ID` / `TRAKT_CLIENT_SECRET`) and click **Save & connect**.
 3. Enter the shown code at <https://trakt.tv/activate>. The token is stored in
-   `~/.config/rustmediahub/trakt.json` (mode 0600).
+   `~/.config/aurivon/trakt.json` (mode 0600).
 
 Then playback is scrobbled (start/pause/stop), **Sync now** syncs watched history both
 ways, and Trakt watchlist / progress rows appear on Home.
@@ -399,7 +401,7 @@ RUST_LOG=info,rmh_player=debug cargo run
 Delete the database to reset:
 
 ```bash
-rm ~/.local/share/rustmediahub/library.db
+rm ~/.local/share/aurivon/library.db
 ```
 
 ### GPU Rendering Issues
