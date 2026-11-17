@@ -23,21 +23,25 @@ pub enum Page {
     Home,
     Library,
     Discover,
+    Calendar,
     Player,
     Details,
+    Person,
     Settings,
 }
 
 impl Page {
-    pub const NAV: [Page; 5] = [Page::Home, Page::Library, Page::Discover, Page::Player, Page::Settings];
+    pub const NAV: [Page; 6] = [Page::Home, Page::Library, Page::Discover, Page::Calendar, Page::Player, Page::Settings];
 
     pub fn label(self) -> &'static str {
         match self {
             Page::Home => "Home",
             Page::Library => "Library",
-            Page::Discover => "Discover",
+            Page::Discover => "Browse",
+            Page::Calendar => "Calendar",
             Page::Player => "Now Playing",
             Page::Details => "Details",
+            Page::Person => "Person",
             Page::Settings => "Settings",
         }
     }
@@ -47,8 +51,10 @@ impl Page {
             Page::Home => "⌂",
             Page::Library => "▤",
             Page::Discover => "◎",
+            Page::Calendar => "▦",
             Page::Player => "▶",
             Page::Details => "ℹ",
+            Page::Person => "☺",
             Page::Settings => "⚙",
         }
     }
@@ -57,9 +63,11 @@ impl Page {
         match self {
             Page::Home => "Pick up where you left off",
             Page::Library => "Everything in your local folders",
-            Page::Discover => "Trending, search and streams",
+            Page::Discover => "Trending, genres, filters and streaming services",
+            Page::Calendar => "New episodes, premieres, cinema and digital releases",
             Page::Player => "",
             Page::Details => "",
+            Page::Person => "",
             Page::Settings => "Libraries, player and connected services",
         }
     }
@@ -158,6 +166,8 @@ pub struct MediaHubView {
     pub(crate) video_checked: bool,
     pub(crate) mpv_version: Option<String>,
 
+    pub(crate) disc: crate::disc::Disc,
+
     pub(crate) focus_handle: FocusHandle,
     _poller: Task<()>,
     _subscriptions: Vec<Subscription>,
@@ -191,7 +201,8 @@ impl MediaHubView {
 
         let volume_slider = cx.new(|_| SliderState::new().min(0.0).max(130.0).step(1.0).default_value(volume as f32));
 
-        let subscriptions = vec![
+        let (disc, disc_subs) = crate::disc::Disc::new(&svc, window, cx);
+        let mut subscriptions = vec![
             cx.subscribe_in(&path_input, window, |this, _, ev: &InputEvent, window, cx| {
                 if let InputEvent::PressEnter { .. } = ev {
                     this.add_library_from_input(window, cx);
@@ -219,6 +230,7 @@ impl MediaHubView {
             }),
         ];
 
+        subscriptions.extend(disc_subs);
         let poller = cx.spawn_in(window, async move |this, cx| loop {
             cx.background_executor().timer(Duration::from_millis(250)).await;
             if this.update_in(cx, |this, window, cx| this.on_tick(window, cx)).is_err() {
@@ -281,6 +293,7 @@ impl MediaHubView {
             theater: false,
             video: None,
             video_checked: false,
+            disc,
             focus_handle,
             _poller: poller,
             _subscriptions: subscriptions,
@@ -288,6 +301,11 @@ impl MediaHubView {
         view.reload(cx);
         view.load_trending(cx);
         view.refresh_trakt(cx);
+        view.refresh_social(cx);
+        if view.disc.search.open {
+            view.on_search_change(cx);
+        }
+        view.load_watchlist(cx);
         view
     }
 
@@ -358,7 +376,13 @@ impl MediaHubView {
                 match (libs, entries) {
                     (Ok(l), Ok(e)) => {
                         this.libraries = l;
+                        this.disc.local_ids = rmh_app::library_ids(&e);
                         this.entries = e;
+                        if this.disc.search.open {
+                            let q = this.disc.search.query.clone();
+                            this.disc.search.local =
+                                rmh_app::search_library(&this.entries, &q).into_iter().take(5).map(|(e, _)| e.item.id).collect();
+                        }
                         if !this.startup_scanned {
                             this.startup_scanned = true;
                             for lib in this.libraries.clone() {
@@ -418,13 +442,18 @@ impl MediaHubView {
         if page == Page::Player && self.now.is_none() {
             return;
         }
-        if page != self.page && self.page != Page::Player && self.page != Page::Details {
+        if page != self.page && !matches!(self.page, Page::Player | Page::Details | Page::Person) {
             self.back_page = self.page;
         }
         if page != Page::Player && self.theater {
             self.set_theater(false, window, cx);
         }
         self.page = page;
+        match page {
+            Page::Discover => self.ensure_browse(cx),
+            Page::Calendar => self.load_calendar(false, cx),
+            _ => {}
+        }
         window.focus(&self.focus_handle, cx);
         cx.notify();
     }
@@ -887,12 +916,18 @@ impl MediaHubView {
 
     pub(crate) fn on_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(now) = self.now.as_mut() else { return };
-        let snap = self.player.snapshot();
+        let mut snap = self.player.snapshot();
+        // Paused and then seeked to the very end: mpv may not report eof-reached
+        // until playback resumes, so treat "paused at the last half second" as the end.
+        if !snap.eof && snap.loaded && snap.paused && snap.duration.is_some_and(|d| d > 5.0 && d - snap.position < 0.6) {
+            snap.eof = true;
+        }
         let outcome = now.tick(&snap);
         let scrobble = now.scrobble_update();
         let fullscreen_changed = snap.fullscreen != self.snap.fullscreen;
         self.snap = snap;
         if let Some((item, action, pct)) = scrobble {
+            self.social_scrobble(&item, action, pct);
             self.svc.trakt_scrobble(action, item, pct);
         }
         match outcome {
@@ -944,6 +979,7 @@ impl MediaHubView {
                 let stop = n.scrobble_stop();
                 self.save_progress(update, cx);
                 if let Some((item, action, _)) = stop {
+                    self.social_scrobble(&item, action, 100.0);
                     self.svc.trakt_scrobble(action, item, 100.0);
                 }
             }
@@ -962,6 +998,7 @@ impl MediaHubView {
                 }
             }
         }
+        self.maybe_auto_subtitles(cx);
         if let Some((at, id)) = self.autoplay {
             if Instant::now() >= at {
                 self.autoplay = None;
@@ -1110,6 +1147,7 @@ impl MediaHubView {
             }
             return;
         }
+        self.load_extras(kind, id, cx);
         let fut = self.svc.title_details(kind, id);
         cx.spawn(async move |this, cx| {
             let res = fut.await;
@@ -1411,13 +1449,26 @@ impl MediaHubView {
 
     pub(crate) fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
+        if self.disc.search.open {
+            if ks.key == "escape" {
+                self.close_search(window, cx);
+                cx.stop_propagation();
+            }
+            return;
+        }
+        if ks.modifiers.control && ks.key == "k" {
+            self.open_search(window, cx);
+            cx.stop_propagation();
+            return;
+        }
         if ks.modifiers.control {
             let page = match ks.key.as_str() {
                 "1" => Some(Page::Home),
                 "2" => Some(Page::Library),
                 "3" => Some(Page::Discover),
-                "4" | "," => Some(Page::Settings),
+                "4" => Some(Page::Calendar),
                 "5" => Some(Page::Player),
+                "6" | "," => Some(Page::Settings),
                 _ => None,
             };
             if let Some(p) = page {
@@ -1447,6 +1498,27 @@ impl MediaHubView {
                 _ => {}
             }
             return;
+        }
+        let root_focused = self.focus_handle.is_focused(window);
+        if root_focused && !ks.modifiers.alt && !ks.modifiers.platform {
+            if ks.key == "/" || ks.key_char.as_deref() == Some("/") {
+                self.open_search(window, cx);
+                cx.stop_propagation();
+                return;
+            }
+            let handled = match self.page {
+                Page::Discover => self.browse_key(ks.key.as_str(), ks.modifiers.shift, window, cx),
+                Page::Calendar => self.calendar_key(ks.key.as_str(), ks.modifiers.shift, window, cx),
+                Page::Details if ks.key == "w" => {
+                    self.details_toggle_watchlist(cx);
+                    true
+                }
+                _ => false,
+            };
+            if handled {
+                cx.stop_propagation();
+                return;
+            }
         }
         // Enter on Home / Library resumes the top Continue Watching (or Up Next) item
         if ks.key == "enter" && matches!(self.page, Page::Home | Page::Library) && self.focus_handle.is_focused(window) {
@@ -1485,6 +1557,11 @@ impl MediaHubView {
             "a" => self.cycle_track(rmh_app::TrackKind::Audio, cx),
             "j" => self.cycle_track(rmh_app::TrackKind::Sub, cx),
             "t" => self.cycle_side_tab(cx),
+            // search OpenSubtitles for what's playing
+            "o" => {
+                self.side_tab = SideTab::Subtitles;
+                self.search_subtitles(false, cx);
+            }
             "n" => self.play_next_now(window, cx),
             "f" => {
                 if self.page != Page::Player {
@@ -1519,3 +1596,28 @@ fn chrono_now() -> chrono::DateTime<chrono::Utc> {
     chrono::Utc::now()
 }
 
+
+impl MediaHubView {
+    /// Mirror Trakt scrobbles to Simkl / AniList
+    fn social_scrobble(&self, item: &TraktItem, action: rmh_app::TraktAction, pct: f64) {
+        let ev = match item {
+            TraktItem::Movie { tmdb } => rmh_app::WatchEvent { kind: TitleKind::Movie, tmdb_id: *tmdb as i32, season: None, episode: None },
+            TraktItem::Episode { show_tmdb, season, number } => {
+                rmh_app::WatchEvent { kind: TitleKind::Tv, tmdb_id: *show_tmdb as i32, season: Some(*season), episode: Some(*number) }
+            }
+        };
+        let action = match action {
+            rmh_app::TraktAction::Start => rmh_app::SocialScrobble::Start,
+            rmh_app::TraktAction::Pause => rmh_app::SocialScrobble::Pause,
+            rmh_app::TraktAction::Stop => rmh_app::SocialScrobble::Stop,
+        };
+        self.svc.social_scrobble(action, ev, pct);
+    }
+
+    pub(crate) fn details_toggle_watchlist(&mut self, cx: &mut Context<Self>) {
+        let Some(d) = self.details.as_ref() else { return };
+        let Some(title) = d.details.as_ref().map(|x| x.title.clone()) else { return };
+        let card = TitleCard { title, poster: d.poster.clone() };
+        self.toggle_watchlist(&card, cx);
+    }
+}

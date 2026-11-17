@@ -212,7 +212,6 @@ impl MediaHubView {
                 self.toggle_row("tg-scrobble", "Scrobble to Trakt", "Send start/pause/stop while watching", cfg.trakt_scrobble, p)
                     .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.update_config(|c| c.trakt_scrobble = !c.trakt_scrobble, false, cx))),
             )
-            .child(div().text_xs().text_color(rgb(p.faint)).child("Coming next (stacked PR): OpenSubtitles search & download, Simkl / AniList sync."))
             .child(
                 div().flex().child(
                     self.button("save-settings", "Save settings", true, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.save_settings(cx))),
@@ -242,7 +241,7 @@ impl MediaHubView {
                 if self.svc.has_real_debrid() { "Real-Debrid: configured" } else { "Real-Debrid: not configured (P2P only)" }.into(),
             ))
             .child(div().text_xs().text_color(rgb(p.faint)).child(
-                "Keys: Space/K play · ←/→ 10 s (Shift 60 s) · ↑/↓ volume · ,/. frame · [/] speed · PgUp/PgDn next/prev chapter · I skip intro · A audio · J subtitles · T panel tab · N next episode · F fullscreen · M mute · S stop · Enter resume · Ctrl+1–5 pages · Ctrl+L home layout · Ctrl+I details",
+                "Keys: Ctrl+K or / search · Space/K play · ←/→ 10 s (Shift 60 s) · ↑/↓ volume · ,/. frame · [/] speed · PgUp/PgDn next/prev chapter · I skip intro · A audio · J subtitles · O OpenSubtitles · T panel tab · N next episode · F fullscreen · M mute · S stop · Enter resume · Ctrl+1–6 pages · Ctrl+L home layout · Ctrl+I details",
             ));
 
         div()
@@ -254,7 +253,117 @@ impl MediaHubView {
             .child(self.card(p).child(self.section_title("Home layout", p)).child(layouts))
             .child(player)
             .child(services)
+            .child(self.more_services(p, cx))
             .child(status)
             .into_any_element()
+    }
+
+    /// Region, OpenSubtitles, Simkl, AniList
+    fn more_services(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let cfg = self.svc.config();
+        let i = &self.disc.inputs;
+        let simkl = &self.disc.simkl;
+        let anilist = &self.disc.anilist;
+        let simkl_state = match (&simkl.username, simkl.logged_in, simkl.configured) {
+            (Some(u), true, _) => format!("Connected as {u}"),
+            (None, true, _) => "Connected".into(),
+            (_, false, true) => "Not connected".into(),
+            _ => "Add a client id (simkl.com/settings/developer) to connect".into(),
+        };
+        let anilist_state = match (&anilist.username, anilist.logged_in) {
+            (Some(u), true) => format!("Connected as {u}"),
+            (None, true) => "Connected".into(),
+            _ if cfg.anilist_client_id.is_some() => "Not connected: open the login page, approve, then paste the token".into(),
+            _ => "Add a client id (anilist.co/settings/developer, redirect https://anilist.co/api/v2/oauth/pin)".into(),
+        };
+        self.card(p)
+            .child(self.section_title("More services", p))
+            .child(
+                div()
+                    .flex()
+                    .gap_4()
+                    .child(div().w(px(160.0)).child(self.field("Region", "Release dates & streaming", &i.region, p)))
+                    .child(div().flex_1().child(self.field("OpenSubtitles API key", "opensubtitles.com/consumers · searches by file hash + TMDB id", &i.os_key, p))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_4()
+                    .child(div().flex_1().child(self.field("OpenSubtitles username", "Optional, raises the daily download limit", &i.os_user, p)))
+                    .child(div().flex_1().child(self.field("OpenSubtitles password", "Optional", &i.os_pass, p))),
+            )
+            .child(
+                self.toggle_row(
+                    "tg-subauto",
+                    "Fetch subtitles automatically",
+                    "When a file has no track in your first subtitle language (Player → subtitle languages, default Czech then English)",
+                    cfg.subtitles_auto,
+                    p,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.update_config(|c| c.subtitles_auto = !c.subtitles_auto, false, cx))),
+            )
+            .child(div().h(px(4.0)))
+            .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("Simkl"))
+            .child(div().text_xs().text_color(rgb(if simkl.logged_in { p.good } else { p.muted })).child(simkl_state))
+            .child(self.field("Simkl client id", "Scrobbling, history and plan-to-watch", &i.simkl_id, p))
+            .when_some(self.disc.simkl_pin.clone(), |d, pin| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_4()
+                        .p_4()
+                        .rounded_xl()
+                        .bg(rgb(p.accent_soft))
+                        .child(div().text_3xl().font_weight(FontWeight::BOLD).child(pin.user_code.clone()))
+                        .child(div().text_sm().child(format!("Open {} and enter this code. Waiting…", pin.verification_url))),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .when(!simkl.logged_in, |d| {
+                        d.child(self.button("simkl-connect", "Connect Simkl", false, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.simkl_connect(cx))))
+                    })
+                    .when(simkl.logged_in, |d| {
+                        d.child(self.button("simkl-out", "Disconnect", false, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.svc.simkl_logout();
+                            this.refresh_social(cx);
+                        })))
+                    }),
+            )
+            .child(
+                self.toggle_row("tg-simkl", "Scrobble to Simkl", "Start / pause / stop while watching", cfg.simkl_scrobble, p)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.update_config(|c| c.simkl_scrobble = !c.simkl_scrobble, false, cx))),
+            )
+            .child(div().h(px(4.0)))
+            .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("AniList"))
+            .child(div().text_xs().text_color(rgb(if anilist.logged_in { p.good } else { p.muted })).child(anilist_state))
+            .child(self.field("AniList client id", "Anime progress (Japanese animation is detected automatically)", &i.anilist_id, p))
+            .when(!anilist.logged_in, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_end()
+                        .gap_2()
+                        .child(self.button("al-open", "Open AniList login", false, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.anilist_open_auth(cx))))
+                        .child(div().flex_1().child(Input::new(&i.anilist_token).w_full()))
+                        .child(self.button("al-save", "Save token", false, p).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.anilist_save_token(window, cx)))),
+                )
+            })
+            .when(anilist.logged_in, |d| {
+                d.child(div().flex().child(self.button("al-out", "Disconnect", false, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                    this.svc.anilist_logout();
+                    this.refresh_social(cx);
+                }))))
+            })
+            .child(
+                self.toggle_row("tg-anilist", "Sync anime to AniList", "Finished episodes update your progress; watchlist adds go to Planning", cfg.anilist_sync, p)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.update_config(|c| c.anilist_sync = !c.anilist_sync, false, cx))),
+            )
+            .child(div().flex().child(
+                self.button("save-services", "Save services", true, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.save_service_settings(cx))),
+            ))
     }
 }

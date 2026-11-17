@@ -364,6 +364,8 @@ struct RawMulti {
 #[derive(Deserialize)]
 struct RawExtras {
     credits: Option<RawCredits>,
+    /// TV only: cast across every season (plain `credits` only lists the latest season)
+    aggregate_credits: Option<RawAggregate>,
     videos: Option<RawVideos>,
     recommendations: Option<Page<RawTitle>>,
     similar: Option<Page<RawTitle>>,
@@ -379,6 +381,26 @@ struct RawCreator {
     id: i32,
     name: String,
     profile_path: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawAggregate {
+    #[serde(default)]
+    cast: Vec<RawAggCast>,
+}
+
+#[derive(Deserialize)]
+struct RawAggCast {
+    id: i32,
+    name: String,
+    profile_path: Option<String>,
+    #[serde(default)]
+    roles: Vec<RawAggRole>,
+}
+
+#[derive(Deserialize)]
+struct RawAggRole {
+    character: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -519,19 +541,32 @@ impl TmdbClient {
 
     /// Cast, crew, trailers, similar & recommended titles, providers for `region`
     pub async fn extras(&self, kind: Kind, tmdb_id: i32, region: &str) -> Result<Extras> {
-        let r: RawExtras = self
-            .get_json(
-                &format!("/{}/{tmdb_id}", kind.as_str()),
-                &[("append_to_response", "credits,videos,recommendations,similar,watch/providers,keywords")],
-            )
-            .await?;
+        let append = match kind {
+            Kind::Tv => "credits,aggregate_credits,videos,recommendations,similar,watch/providers,keywords",
+            _ => "credits,videos,recommendations,similar,watch/providers,keywords",
+        };
+        let r: RawExtras = self.get_json(&format!("/{}/{tmdb_id}", kind.as_str()), &[("append_to_response", append)]).await?;
         let credits = r.credits.unwrap_or(RawCredits { cast: vec![], crew: vec![] });
-        let cast = credits
-            .cast
-            .into_iter()
-            .take(20)
-            .map(|c| CastMember { id: c.id, name: c.name, role: c.character.unwrap_or_default(), profile_path: c.profile_path })
-            .collect();
+        let aggregate = r.aggregate_credits.map(|a| a.cast).unwrap_or_default();
+        let cast: Vec<CastMember> = if aggregate.len() > credits.cast.len() {
+            aggregate
+                .into_iter()
+                .take(20)
+                .map(|c| CastMember {
+                    id: c.id,
+                    name: c.name,
+                    role: c.roles.into_iter().find_map(|r| r.character.filter(|s| !s.is_empty())).unwrap_or_default(),
+                    profile_path: c.profile_path,
+                })
+                .collect()
+        } else {
+            credits
+                .cast
+                .into_iter()
+                .take(20)
+                .map(|c| CastMember { id: c.id, name: c.name, role: c.character.unwrap_or_default(), profile_path: c.profile_path })
+                .collect()
+        };
         let mut crew: Vec<CastMember> = credits
             .crew
             .into_iter()
@@ -722,6 +757,9 @@ impl TmdbClient {
                     ("sort_by", "popularity.desc"),
                     ("include_adult", "false"),
                     ("with_type", "2|4"),
+                    // skip daily soaps, talk shows, news and reality
+                    ("without_genres", "10763,10764,10766,10767"),
+                    ("vote_count.gte", "100"),
                     ("page", page.as_str()),
                 ],
             )

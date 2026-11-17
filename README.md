@@ -4,7 +4,7 @@ A lightweight, high-performance media center application built entirely in Rust.
 
 ## Features
 
-- 🎬 **Native GPU-accelerated UI** - Uses Iced with wgpu (Vulkan/Metal/DX12)
+- 🎬 **Native GPU-accelerated UI** - GPUI (the Zed UI framework), GPU-rendered
 - 🔌 **Extensible Addon System** - Stremio-compatible plugin architecture
 - 📂 **Library Management** - Scan directories for video and audio files
 - ⏯️ **In-app playback controls** - Play/pause, seek, ±10s, volume, stop, resume where you left off
@@ -12,6 +12,13 @@ A lightweight, high-performance media center application built entirely in Rust.
 - ▶️ **Hardware-Accelerated Playback** - Uses MPV with `--hwdec=auto`
 - 💾 **SQLite Database** - Fast, embedded storage with compile-time checked queries
 - 🔍 **Full-Text Search** - SQLite FTS5 for instant search
+- 🔎 **Instant global search** (`Ctrl+K` / `/`) across your library, TMDB titles and people, typo tolerant ("interstelar" → Interstellar)
+- 🧭 **Browse** with genre, year, rating, runtime, language and streaming-provider filters + sort, curated rows, keyboard-navigable grid
+- 👤 **Person pages**, cast & crew, trailers, *Recommended* / *Similar* titles, "available locally / Real-Debrid / on Netflix" badges
+- ⭐ **Watchlist from anywhere** (`W` or the + on any card), mirrored to Trakt / Simkl / AniList
+- 📅 **Release calendar** (Trakt calendars, TMDB fallback): month + agenda views, my shows / everything, cinema vs digital, local time
+- 💬 **OpenSubtitles** search by file hash + TMDB id, auto-download in your languages (Czech + English by default)
+- 🔁 **Simkl + AniList** scrobbling / sync
 
 ## Architecture
 
@@ -217,7 +224,14 @@ Application data is stored in:
    Progress is saved and resumes next time; items watched past 90 % are marked ✓.
    Settings → Player → *Separate mpv window* restores the old standalone fullscreen window.
 
-5. **Home:** three layouts to compare (Settings → Home layout, the pills on Home, or `Ctrl+L`):
+5. **Find something:** `Ctrl+K` (or `/`) opens search from anywhere, `↑/↓` + `Enter`.
+   `rustmediahub --search "dune"` starts with the search open. **Browse** (`Ctrl+3`) has
+   filter panels (`F`), sort (`O`), movies/series (`V`), clear (`X`), more results (`L`).
+   **Calendar** (`Ctrl+4`): `←/→/↑/↓` day, `PgUp/PgDn` month, `V` month/agenda, `M` mine,
+   `Y` movies/series, `D` cinema/digital, `T` today, `R` refresh. Results are cached on disk
+   (`~/.cache/rustmediahub/{tmdb,calendar,images}`).
+
+6. **Home:** three layouts to compare (Settings → Home layout, the pills on Home, or `Ctrl+L`):
    **A** Continue watching + Up next, **B** Discover with a trending hero, **C** library grid.
 
 ### App shortcuts
@@ -225,8 +239,9 @@ Application data is stored in:
 - `Space`/`K` play/pause · `←/→` 10 s (`Shift` 60 s) · `↑/↓` volume · `M` mute
 - `PgUp/PgDn` next/previous chapter · `I` skip intro · `N` next episode
 - `,`/`.` frame back/forward · `[`/`]` speed · `Backspace` normal speed
-- `A` cycle audio · `J` cycle subtitles · `T` side-panel tab · `F` fullscreen · `Esc` leave · `S` stop
-- `Enter` resume top Continue-watching item · `Ctrl+1–5` pages · `Ctrl+L` home layout · `Ctrl+I` details
+- `A` cycle audio · `J` cycle subtitles · `O` search OpenSubtitles · `T` side-panel tab · `F` fullscreen · `Esc` leave · `S` stop
+- `Ctrl+K` or `/` search · `W` add/remove watchlist (details, browse, calendar) · `Enter` open / resume
+- `Ctrl+1–6` Home, Library, Browse, Calendar, Player, Settings · `Ctrl+L` home layout · `Ctrl+I` details
 
 ### Trakt
 
@@ -239,6 +254,24 @@ Application data is stored in:
 
 Then playback is scrobbled (start/pause/stop), **Sync now** syncs watched history both
 ways, and Trakt watchlist / progress rows appear on Home.
+
+### More services (Settings → More services)
+
+All keys come from Settings or the environment (`.env`); nothing is hard-coded.
+
+- **Region / time zone:** `region` (default `CZ`) drives providers, release dates and the
+  TMDB calendar; `timezone` (default `Europe/Prague`) is used for calendar times.
+- **OpenSubtitles:** API key from <https://www.opensubtitles.com/consumers>
+  (`OPENSUBTITLES_API_KEY`), optionally your account (`OPENSUBTITLES_USERNAME` /
+  `OPENSUBTITLES_PASSWORD`) for more daily downloads. Preferred languages default to
+  Czech + English; with *auto subtitles* on, the best match is fetched when playback starts.
+- **Simkl:** client id from <https://simkl.com/settings/developer/> (`SIMKL_CLIENT_ID`),
+  then **Connect** and enter the PIN at <https://simkl.com/pin>.
+- **AniList:** client id from <https://anilist.co/settings/developer> with redirect URL
+  `https://anilist.co/api/v2/oauth/pin` (`ANILIST_CLIENT_ID`), **Open login**, paste the token.
+- Tokens are stored next to the database (`simkl.json`, `anilist.json`, mode 0600).
+- The release calendar uses Trakt when you're connected (your shows + global premieres),
+  otherwise TMDB (popular shows airing + regional theatrical/digital releases).
 
 ### Test the player without the GUI
 

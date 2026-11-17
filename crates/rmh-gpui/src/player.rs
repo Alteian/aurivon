@@ -251,6 +251,7 @@ impl MediaHubView {
                 .into_any_element();
         };
         let scale = window.scale_factor();
+        let covered = self.disc.search.open;
         div()
             .flex_1()
             .min_h(px(120.0))
@@ -259,6 +260,10 @@ impl MediaHubView {
                 canvas(
                     move |b, _, _| b,
                     move |b, _, _, _| {
+                        if covered {
+                            host.hide();
+                            return;
+                        }
                         host.place(
                             f32::from(b.origin.x) * scale,
                             f32::from(b.origin.y) * scale,
@@ -349,9 +354,42 @@ impl MediaHubView {
                 }
                 if kind == TrackKind::Sub {
                     body = body.child(div().h(px(8.0))).child(
-                        self.button("sub-load", "Load subtitle file…", false, p)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.load_subtitle_file(cx))),
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                self.button("sub-os", if self.disc.subs_loading { "Searching…" } else { "Search OpenSubtitles" }, true, p)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.search_subtitles(false, cx))),
+                            )
+                            .child(
+                                self.button("sub-load", "File…", false, p)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.load_subtitle_file(cx))),
+                            ),
                     );
+                    if let Some(m) = self.disc.subs_msg.clone() {
+                        body = body.child(div().px_1().pt_2().text_xs().text_color(rgb(p.muted)).child(m));
+                    }
+                    for (i, s) in self.disc.subs.iter().take(30).enumerate() {
+                        let sub = s.clone();
+                        let mut tags = vec![rmh_app::language_label(&s.language).to_string()];
+                        if s.hash_match {
+                            tags.push("exact match".into());
+                        }
+                        if s.trusted {
+                            tags.push("trusted".into());
+                        }
+                        if s.hearing_impaired {
+                            tags.push("SDH".into());
+                        }
+                        if s.ai_translated {
+                            tags.push("AI".into());
+                        }
+                        tags.push(format!("{} ↓", s.downloads));
+                        body = body.child(
+                            row(format!("os-{i}"), s.release.clone(), Some(tags.join(" · ")), false)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.download_subtitle(sub.clone(), cx))),
+                        );
+                    }
                 }
             }
             SideTab::Speed => {

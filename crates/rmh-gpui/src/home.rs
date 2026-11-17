@@ -45,7 +45,12 @@ impl MediaHubView {
             HomeLayout::Discover => self.home_discover(p, cx),
             HomeLayout::Library => self.home_library(p, cx),
         };
-        div().flex().flex_col().gap_6().child(self.layout_switcher(p, cx)).child(body).into_any_element()
+        let mut col = div().flex().flex_col().gap_6().child(self.layout_switcher(p, cx)).child(body);
+        if !self.disc.watch_cards.is_empty() {
+            let cards = self.disc.watch_cards.iter().map(|c| self.title_card(c, "home-wl", 150.0, p, cx)).collect();
+            col = col.child(self.section("Your watchlist", Some(format!("{} titles", self.disc.watch_cards.len())), self.row("home-wl", cards), p));
+        }
+        col.into_any_element()
     }
 
     /// Trakt continue-watching / watchlist cards that aren't in the local library
@@ -325,46 +330,5 @@ impl MediaHubView {
             .child(div().text_sm().text_color(rgb(p.muted)).child(format!("{count} files · click for details, double-click to play")))
             .child(self.grid(self.library_cards(&items, "lib", p, cx)))
             .into_any_element()
-    }
-
-    pub(crate) fn discover_page(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let mut col = div().flex().flex_col().gap_6().child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(div().flex_1().child(Input::new(&self.discover_input).w_full()))
-                .child(
-                    self.button("discover-search", if self.searching { "Searching…" } else { "Search" }, true, p)
-                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.search_discover(cx))),
-                ),
-        );
-        if !self.svc.has_tmdb() {
-            col = col.child(
-                self.card(p)
-                    .child(div().text_sm().text_color(rgb(p.muted)).child(
-                        "Title search, posters and trending need a TMDB API key (Settings → Services). IMDb ids (tt…) still find streams without it.",
-                    )),
-            );
-        }
-        if !self.results.is_empty() {
-            col = col.child(self.section(
-                "Results",
-                Some(format!("{}", self.results.len())),
-                self.grid(self.results.iter().map(|c| self.title_card(c, "res", 160.0, p, cx)).collect()),
-                p,
-            ));
-        } else if !self.trending.is_empty() {
-            col = col.child(self.section(
-                "Trending this week",
-                None,
-                self.grid(self.trending.iter().map(|c| self.title_card(c, "disc", 160.0, p, cx)).collect()),
-                p,
-            ));
-        }
-        if self.stream_ctx.is_some() && self.details.is_none() {
-            col = col.child(self.streams_list(p, cx));
-        }
-        col.into_any_element()
     }
 }

@@ -102,13 +102,17 @@ impl MediaHubView {
                 );
             }
         }
-        if self.trakt.logged_in {
-            if let (Some(k), Some(id)) = (kind, tmdb_id) {
-                actions = actions.child(
-                    self.button("det-wl", "+ Trakt watchlist", false, p)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.trakt_watchlist_add(k, id, cx))),
-                );
-            }
+        let extras = self.disc.extras.as_ref().filter(|(k, _)| Some(k.0) == kind && Some(k.1) == tmdb_id).map(|(_, x)| x);
+        if let Some(v) = extras.and_then(|x| x.extras.best_trailer()).and_then(|v| v.url()) {
+            actions = actions.child(self.button("det-trailer", "▶  Trailer", false, p).on_click(cx.listener(move |_, _: &ClickEvent, _w, cx| cx.open_url(&v))));
+        }
+        if let (Some(k), Some(id), Some(t)) = (kind, tmdb_id, title.clone()) {
+            let listed = self.disc.watch_ids.contains(&(k, id));
+            let card = rmh_app::TitleCard { title: t, poster: d.poster.clone() };
+            actions = actions.child(
+                self.button("det-wl", if listed { "✓ On watchlist" } else { "+ Watchlist" }, false, p)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.toggle_watchlist(&card, cx))),
+            );
         }
         actions = actions.child(self.button("det-back", "← Back", false, p).on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
             let back = this.back_page;
@@ -147,6 +151,7 @@ impl MediaHubView {
                                 el.child(div().text_sm().italic().text_color(rgb(p.muted)).child(t))
                             })
                             .child(div().text_sm().text_color(rgb(p.muted)).child(meta))
+                            .child(self.availability(kind, tmdb_id, local.is_some(), p))
                             .child(div().text_sm().line_clamp(5).child(
                                 title.as_ref().and_then(|t| t.overview.clone()).unwrap_or_else(|| {
                                     if d.loading { "Loading details…".into() } else { String::new() }
@@ -229,6 +234,105 @@ impl MediaHubView {
 
         if self.stream_ctx.is_some() {
             col = col.child(self.streams_list(p, cx));
+        }
+        if let Some(x) = extras.cloned() {
+            col = col.child(self.extras_sections(&x, kind, p, cx));
+        } else if self.disc.extras_loading {
+            col = col.child(div().text_sm().text_color(rgb(p.muted)).child("Loading cast, trailers and similar titles…"));
+        }
+        col.into_any_element()
+    }
+
+    /// "In library" / "Real-Debrid" / "On Netflix" badges
+    fn availability(&self, kind: Option<TitleKind>, tmdb_id: Option<i32>, local: bool, p: Palette) -> impl IntoElement {
+        let extras = self.disc.extras.as_ref().filter(|(k, _)| Some(k.0) == kind && Some(k.1) == tmdb_id).map(|(_, x)| x);
+        let local = local || matches!((kind, tmdb_id), (Some(k), Some(id)) if self.disc.local_ids.contains(&(k, id)));
+        let mut row = div().flex().flex_wrap().items_center().gap_2();
+        if local {
+            row = row.child(chip("▶ Available locally", 0x5FD39A22, p.good));
+        }
+        if self.svc.has_real_debrid() {
+            row = row.child(chip("⚡ Real-Debrid streams", 0x4CC9F022, 0x4CC9F0));
+        }
+        if let Some(x) = extras {
+            for prov in x.extras.providers.iter().take(6) {
+                let logo = x.provider_logos.get(&prov.id).cloned();
+                row = row.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .pl(px(2.0))
+                        .pr_2()
+                        .py(px(2.0))
+                        .rounded_md()
+                        .bg(rgba(0xFFFFFF10))
+                        .text_xs()
+                        .when_some(logo, |d, l| d.child(img(l).size(px(18.0)).rounded_sm()))
+                        .child(prov.name.clone()),
+                );
+            }
+        }
+        row
+    }
+
+    fn extras_sections(&self, x: &rmh_app::TitleExtras, kind: Option<TitleKind>, p: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let mut col = div().flex().flex_col().gap_6();
+        // crew line
+        let crew: Vec<String> = x.extras.crew.iter().take(5).map(|c| format!("{} ({})", c.name, c.role)).collect();
+        if !crew.is_empty() || !x.extras.keywords.is_empty() {
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .when(!crew.is_empty(), |d| d.child(div().text_sm().child(crew.join(" · "))))
+                    .when(!x.extras.keywords.is_empty(), |d| {
+                        d.child(div().flex().flex_wrap().gap_1().children(x.extras.keywords.iter().take(10).map(|k| chip(k.clone(), 0xFFFFFF0C, p.muted))))
+                    }),
+            );
+        }
+        // cast
+        if !x.extras.cast.is_empty() {
+            let mut people = vec![];
+            for (i, c) in x.extras.cast.iter().take(16).enumerate() {
+                let (id, name) = (c.id, c.name.clone());
+                people.push(
+                    div()
+                        .id(SharedString::from(format!("cast-{i}")))
+                        .w(px(110.0))
+                        .flex_none()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_2()
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_person(id, name.clone(), window, cx)))
+                        .child(
+                            div()
+                                .size(px(96.0))
+                                .rounded_full()
+                                .overflow_hidden()
+                                .border_2()
+                                .border_color(rgb(p.border_soft))
+                                .hover(|s| s.border_color(rgb(p.accent)))
+                                .child(poster(&c.name, x.photos.get(&c.id).cloned(), None)),
+                        )
+                        .child(div().w_full().text_xs().font_weight(FontWeight::MEDIUM).text_center().truncate().child(c.name.clone()))
+                        .child(div().w_full().text_xs().text_color(rgb(p.muted)).text_center().truncate().child(c.role.clone()))
+                        .into_any_element(),
+                );
+            }
+            col = col.child(self.section("Cast", Some("click a person for their filmography".into()), self.row("cast", people), p));
+        }
+        if !x.recommended.is_empty() {
+            let cards = x.recommended.iter().map(|c| self.title_card(c, "rec", 150.0, p, cx)).collect();
+            col = col.child(self.section("Recommended", Some("people who liked this also watched".into()), self.row("rec", cards), p));
+        }
+        if !x.similar.is_empty() {
+            let cards = x.similar.iter().map(|c| self.title_card(c, "sim", 150.0, p, cx)).collect();
+            let label = if kind == Some(TitleKind::Tv) { "Similar series" } else { "Similar movies" };
+            col = col.child(self.section(label, None, self.row("sim", cards), p));
         }
         col.into_any_element()
     }

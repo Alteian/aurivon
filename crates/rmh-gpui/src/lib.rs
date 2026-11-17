@@ -1,9 +1,14 @@
 //! GPUI front end for RustMediaHub (same gpui-kit stack as Kalyreon).
 
+mod browse;
+mod calendar;
 mod details;
+mod disc;
 mod embed;
 mod home;
+mod person;
 mod player;
+mod search;
 mod settings;
 mod theme;
 mod ui;
@@ -36,6 +41,7 @@ pub fn run() -> Result<(), String> {
     gpui_kit::application().with_assets(Assets).run(move |cx| {
         gpui_kit::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
+        disc::bind_keys(cx);
 
         let options = WindowOptions {
             titlebar: Some(TitlebarOptions { title: Some("RustMediaHub".into()), ..Default::default() }),

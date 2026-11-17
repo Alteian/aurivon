@@ -275,8 +275,17 @@ impl MediaHubView {
 
     /// Card for a TMDB title (Discover, Trakt lists)
     pub(crate) fn title_card(&self, c: &TitleCard, key: &str, width: f32, p: Palette, cx: &mut Context<Self>) -> AnyElement {
+        self.title_card_sel(c, key, width, false, p, cx)
+    }
+
+    /// Poster card; `sel` = keyboard focus ring
+    pub(crate) fn title_card_sel(&self, c: &TitleCard, key: &str, width: f32, sel: bool, p: Palette, cx: &mut Context<Self>) -> AnyElement {
         let card = c.clone();
+        let wl_card = c.clone();
         let t = &c.title;
+        let local = self.disc.local_ids.contains(&(t.kind, t.tmdb_id));
+        let listed = self.disc.watch_ids.contains(&(t.kind, t.tmdb_id));
+        let wl_id = SharedString::from(format!("wl-{key}-{}-{}", t.kind.as_str(), t.tmdb_id));
         div()
             .id(SharedString::from(format!("title-{key}-{}-{}", t.kind.as_str(), t.tmdb_id)))
             .w(px(width))
@@ -293,10 +302,34 @@ impl MediaHubView {
                     .w_full()
                     .rounded_xl()
                     .overflow_hidden()
-                    .border_1()
-                    .border_color(rgb(p.border_soft))
+                    .border_2()
+                    .border_color(rgb(if sel { p.text } else { p.border_soft }))
+                    .when(sel, |d| d.shadow_lg())
                     .hover(|s| s.border_color(rgb(p.accent)))
                     .child(poster(&t.name, c.poster.clone(), None))
+                    .when(local, |d| d.child(div().absolute().bottom_2().left_2().child(chip("▶ In library", 0x0F2A1EE6, p.good))))
+                    .child(
+                        div()
+                            .id(wl_id)
+                            .absolute()
+                            .bottom_2()
+                            .right_2()
+                            .size(px(28.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .cursor_pointer()
+                            .bg(rgba(if listed { 0x8B7CFFEE } else { 0x000000AA }))
+                            .text_color(rgb(if listed { p.on_accent } else { p.text }))
+                            .text_sm()
+                            .hover(|s| s.bg(rgb(p.accent)).text_color(rgb(p.on_accent)))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                                cx.stop_propagation();
+                                this.toggle_watchlist(&wl_card, cx);
+                            }))
+                            .child(if listed { "✓" } else { "+" }),
+                    )
                     .when_some(t.rating.filter(|r| *r > 0.0), |d, r| {
                         d.child(div().absolute().top_2().right_2().child(chip(format!("★ {r:.1}"), 0x000000AA, 0xF2B45C)))
                     })
@@ -355,7 +388,7 @@ impl MediaHubView {
             if page == Page::Player && self.now.is_none() {
                 continue;
             }
-            let selected = self.page == page || (page == Page::Discover && self.page == Page::Details);
+            let selected = self.page == page || (page == Page::Discover && matches!(self.page, Page::Details | Page::Person));
             nav = nav.child(
                 div()
                     .id(SharedString::from(format!("nav-{}", page.label())))
@@ -431,6 +464,27 @@ impl MediaHubView {
                             .child(div().text_xs().text_color(rgb(p.muted)).child("Media center")),
                     ),
             )
+            .child(
+                div()
+                    .id("side-search")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .rounded_lg()
+                    .cursor_pointer()
+                    .bg(rgb(p.surface))
+                    .border_1()
+                    .border_color(rgb(p.border_soft))
+                    .text_sm()
+                    .text_color(rgb(p.muted))
+                    .hover(|s| s.border_color(rgb(p.accent)))
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_search(window, cx)))
+                    .child(div().text_color(rgb(p.accent)).child("⌕"))
+                    .child(div().flex_1().child("Search"))
+                    .child(div().text_xs().text_color(rgb(p.faint)).child("Ctrl K")),
+            )
             .child(nav)
             .child(div().flex_1())
             .child(
@@ -460,6 +514,7 @@ impl MediaHubView {
     fn top_bar(&self, p: Palette) -> impl IntoElement {
         let title = match self.page {
             Page::Details => self.details.as_ref().map(|d| d.name.clone()).unwrap_or_default(),
+            Page::Person => self.disc.person.as_ref().map(|d| d.name.clone()).unwrap_or_default(),
             Page::Player => self.now.as_ref().map(|n| n.title.clone()).unwrap_or_default(),
             other => other.label().to_string(),
         };
@@ -585,11 +640,24 @@ impl Render for MediaHubView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = DARK;
         self.ensure_video_host(window);
-        if window.focused(cx).is_none() {
+        if self.disc.search.open && self.disc.search.focus_pending {
+            self.disc.search.focus_pending = false;
+            let input = self.disc.search.input.clone();
+            input.update(cx, |s, cx| s.focus(window, cx));
+        } else if window.focused(cx).is_none() {
             window.focus(&self.focus_handle, cx);
         }
         // The native video surface is only visible on the player page
         let on_player = self.page == Page::Player && self.now.is_some();
+        // browse grid columns for keyboard navigation
+        let vw = f32::from(window.viewport_size().width);
+        let content = vw - if self.theater { 0.0 } else { 220.0 } - 64.0 - 14.0;
+        self.disc.grid_cols = (((content + crate::browse::GRID_GAP) / (crate::browse::GRID_CARD + crate::browse::GRID_GAP)).floor() as usize).max(1);
+        if self.disc.search.open {
+            if let Some(v) = &self.video {
+                v.hide();
+            }
+        }
         if !on_player {
             if let Some(v) = &self.video {
                 v.hide();
@@ -611,8 +679,10 @@ impl Render for MediaHubView {
             let content = match self.page {
                 Page::Home => self.home_page(p, cx),
                 Page::Library => self.library_page(p, cx),
-                Page::Discover => self.discover_page(p, cx),
+                Page::Discover => self.browse_page(p, window, cx),
+                Page::Calendar => self.calendar_page(p, cx),
                 Page::Details => self.details_page(p, cx),
+                Page::Person => self.person_page(p, cx),
                 Page::Settings => self.settings_page(p, cx),
                 Page::Player => self.home_page(p, cx),
             };
@@ -639,6 +709,9 @@ impl Render for MediaHubView {
             .text_color(rgb(p.text))
             .when(!self.theater, |d| d.child(self.sidebar(p, cx)))
             .child(main);
+        if self.disc.search.open {
+            shell = shell.child(self.search_overlay(p, cx));
+        }
         if let Some(err) = self.error.clone() {
             shell = shell.child(self.error_toast(err, p, cx));
         }

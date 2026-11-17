@@ -142,23 +142,24 @@ impl MediaService {
             }
             let mut res = tmdb.search_all(&q).await.map_err(|e| format!("TMDB search failed: {e:#}"))?;
             let mut corrected = None;
-            if res.titles.len() < 3 && q.chars().count() >= 4 {
+            // Weak results (few hits, or only obscure titles): a typo is likely
+            let popular = res.titles.iter().any(|t| t.votes.unwrap_or(0) >= 300 && fuzzy::score(&q, &t.name) >= 0.85);
+            let mut fallback: HashSet<(Kind, i32)> = HashSet::new();
+            if (res.titles.len() < 3 || !popular) && q.chars().count() >= 4 {
                 // 1) titles we've already seen (trending, browse, library) by fuzzy match
                 let mut extra = svc.seen_matches(&q, 0.72);
                 // 2) TMDB matches prefixes, so a typo near the end disappears when trimmed
-                if res.titles.is_empty() && extra.is_empty() {
-                    let chars: Vec<char> = q.chars().collect();
-                    for cut in 1..=3usize {
-                        if chars.len() <= cut + 3 {
-                            break;
-                        }
-                        let shorter: String = chars[..chars.len() - cut].iter().collect();
-                        let r = tmdb.search_all(&shorter).await.unwrap_or_default();
-                        let good: Vec<Title> = r.titles.into_iter().filter(|t| fuzzy::score(&q, &t.name) >= 0.6).collect();
-                        if !good.is_empty() {
-                            extra = good;
-                            break;
-                        }
+                let chars: Vec<char> = q.chars().collect();
+                for cut in 1..=3usize {
+                    if chars.len() <= cut + 3 {
+                        break;
+                    }
+                    let shorter: String = chars[..chars.len() - cut].iter().collect();
+                    let r = tmdb.search_all(&shorter).await.unwrap_or_default();
+                    let good: Vec<Title> = r.titles.into_iter().filter(|t| fuzzy::score(&q, &t.name) >= 0.6).collect();
+                    if good.iter().any(|t| t.votes.unwrap_or(0) >= 300) || (!good.is_empty() && res.titles.is_empty()) {
+                        extra.extend(good);
+                        break;
                     }
                 }
                 // 3) multi-word queries: try the longest word alone
@@ -168,19 +169,23 @@ impl MediaService {
                         extra = r.titles.into_iter().filter(|t| fuzzy::score(&q, &t.name) >= 0.6).collect();
                     }
                 }
-                if res.titles.is_empty() {
-                    corrected = extra.first().map(|t| t.name.clone());
-                }
                 let have: HashSet<(Kind, i32)> = res.titles.iter().map(|t| (t.kind, t.tmdb_id)).collect();
-                res.titles.extend(extra.into_iter().filter(|t| !have.contains(&(t.kind, t.tmdb_id))));
+                for t in extra {
+                    if !have.contains(&(t.kind, t.tmdb_id)) && fallback.insert((t.kind, t.tmdb_id)) {
+                        res.titles.push(t);
+                    }
+                }
             }
-            // Exact / prefix matches first, then TMDB's popularity order
+            // How well the name matches, plus a popularity nudge so a famous title
+            // with one typo beats an obscure exact match
+            let rank = |t: &Title| fuzzy::score(&q, &t.name) + 0.05 * ((t.votes.unwrap_or(0) as f32) + 1.0).log10();
             let mut ranked: Vec<(usize, Title)> = res.titles.into_iter().enumerate().collect();
-            ranked.sort_by(|(ia, a), (ib, b)| {
-                let sa = (fuzzy::score(&q, &a.name) * 10.0) as i32;
-                let sb = (fuzzy::score(&q, &b.name) * 10.0) as i32;
-                sb.cmp(&sa).then(ia.cmp(ib))
-            });
+            ranked.sort_by(|(ia, a), (ib, b)| rank(b).partial_cmp(&rank(a)).unwrap_or(std::cmp::Ordering::Equal).then(ia.cmp(ib)));
+            if let Some((_, top)) = ranked.first() {
+                if fallback.contains(&(top.kind, top.tmdb_id)) && fuzzy::score(&q, &top.name) < 0.95 {
+                    corrected = Some(top.name.clone());
+                }
+            }
             let titles: Vec<Title> = ranked.into_iter().map(|(_, t)| t).take(16).collect();
             svc.remember(&titles);
             let people: Vec<PersonCard> = res.people.into_iter().take(6).collect();
@@ -275,7 +280,16 @@ impl MediaService {
             svc.remember(&extras.recommendations);
             svc.remember(&extras.similar);
             let recommended = with_posters(extras.recommendations.iter().take(16).cloned().collect(), &http, &images).await;
-            let similar = with_posters(extras.similar.iter().take(16).cloned().collect(), &http, &images).await;
+            // TMDB's "similar" list is noisy: keep titles people actually watched and rated
+            let rec_ids: HashSet<i32> = extras.recommendations.iter().map(|t| t.tmdb_id).collect();
+            let mut sim: Vec<Title> = extras
+                .similar
+                .iter()
+                .filter(|t| t.votes.unwrap_or(0) >= 150 && t.rating.unwrap_or(0.0) >= 6.0 && !rec_ids.contains(&t.tmdb_id))
+                .cloned()
+                .collect();
+            sim.sort_by(|a, b| b.votes.unwrap_or(0).cmp(&a.votes.unwrap_or(0)));
+            let similar = with_posters(sim.into_iter().take(16).collect(), &http, &images).await;
             Ok(TitleExtras { extras, photos, provider_logos, recommended, similar })
         })
     }
@@ -293,7 +307,14 @@ impl MediaService {
             let mut known: Vec<&Credit> = person.credits.iter().filter(|c| c.title.poster_path.is_some()).collect();
             known.sort_by(|a, b| b.title.votes.unwrap_or(0).cmp(&a.title.votes.unwrap_or(0)));
             let known_titles: Vec<Title> = known.iter().take(12).map(|c| c.title.clone()).collect();
-            let all: Vec<Credit> = person.credits.iter().take(80).cloned().collect();
+            // skip "Self", "Thanks" and archive-footage appearances
+            let noise = |role: &str| {
+                role.split(" · ").all(|r| {
+                    let r = r.to_lowercase();
+                    r.is_empty() || r.starts_with("self") || r.starts_with("himself") || r.starts_with("herself") || r == "thanks" || r.contains("archive")
+                })
+            };
+            let all: Vec<Credit> = person.credits.iter().filter(|c| !noise(&c.role) || c.department != "Acting" && c.department != "Crew").take(80).cloned().collect();
             let known_for = with_posters(known_titles, &http, &images).await;
             let cards = with_posters(all.iter().map(|c| c.title.clone()).collect(), &http, &images).await;
             let credits = cards.into_iter().zip(all).map(|(card, c)| (card, c.role, c.department)).collect();

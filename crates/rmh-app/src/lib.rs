@@ -19,7 +19,7 @@ pub mod trakt;
 
 pub use catalog::{next_episode, up_next, LibraryEntry, SeasonSummary, TitleCard, TitleKind};
 pub use calendar::{month_grid, CalendarItem, CalendarMonth, ReleaseKind};
-pub use config::{AppConfig, HomeLayout, VideoMode};
+pub use config::{lang_code, AppConfig, HomeLayout, VideoMode};
 pub use discovery::{
     library_ids, search_library, BrowseResults, BrowseSort, CastMember, Credit, DiscoverQuery, Extras, Facets, Genre, ListKind,
     PersonHit, PersonPage, Provider, SearchHits, TitleExtras, Video,
@@ -27,6 +27,7 @@ pub use discovery::{
 pub use social::{ServiceStatus, SimklPin, WatchEvent};
 pub use subs::{SubContext, SubtitleHit};
 pub use watchlist::WatchItem;
+pub use rmh_services::opensubtitles::language_name as language_label;
 pub use rmh_services::simkl::Scrobble as SocialScrobble;
 pub use service::{expand_home, is_audio, MediaService, MovieHit, ResolvedStream, ServiceResult, StreamHit};
 pub use session::{format_time, resume_position, NowPlaying, ProgressUpdate, TickOutcome};
