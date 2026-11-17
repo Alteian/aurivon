@@ -618,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "aurivon"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "dotenvy",
@@ -7488,7 +7488,7 @@ dependencies = [
 
 [[package]]
 name = "rmh-addon"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7506,7 +7506,7 @@ dependencies = [
 
 [[package]]
 name = "rmh-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7536,7 +7536,7 @@ dependencies = [
 
 [[package]]
 name = "rmh-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "serde",
@@ -7546,7 +7546,7 @@ dependencies = [
 
 [[package]]
 name = "rmh-database"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7561,7 +7561,7 @@ dependencies = [
 
 [[package]]
 name = "rmh-gpui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "gpui-kit",
@@ -7574,7 +7574,7 @@ dependencies = [
 
 [[package]]
 name = "rmh-metadata"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "regex-lite",
@@ -7591,7 +7591,7 @@ dependencies = [
 
 [[package]]
 name = "rmh-player"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "rmh-core",
@@ -7605,7 +7605,7 @@ dependencies = [
 
 [[package]]
 name = "rmh-scanner"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "rmh-core",
@@ -7620,7 +7620,7 @@ dependencies = [
 
 [[package]]
 name = "rmh-scraper"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7643,7 +7643,7 @@ dependencies = [
 
 [[package]]
 name = "rmh-services"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -7657,7 +7657,7 @@ dependencies = [
 
 [[package]]
 name = "rmh-torrent"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7680,7 +7680,7 @@ dependencies = [
 
 [[package]]
 name = "rmh-trakt"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7694,7 +7694,7 @@ dependencies = [
 
 [[package]]
 name = "rmh-ui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-channel",

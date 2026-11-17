@@ -5,6 +5,8 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-17
+
 ### Changed
 - RustMediaHub is now **Aurivon**: `aurivon` command, "Aurivon" in the app launcher, new lyre-inspired icon
 - Settings, keys, library and caches move automatically from the old `rustmediahub` folders to `aurivon`; the old install is replaced
