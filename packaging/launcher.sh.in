@@ -11,8 +11,9 @@ if [ -z "$DISPLAY" ] && command -v systemctl >/dev/null 2>&1; then
     [ -n "$d" ] && DISPLAY="$d" && export DISPLAY
 fi
 
-# Started from the app launcher: keep a log instead of discarding output
-if [ ! -t 2 ]; then
+# Started from the app launcher (no arguments, no terminal): keep a log instead
+# of discarding output. Command-line use (--version, --update, ...) prints as usual.
+if [ $# -eq 0 ] && [ ! -t 1 ] && [ ! -t 2 ]; then
     LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/aurivon"
     mkdir -p "$LOG_DIR"
     [ -f "$LOG_DIR/aurivon.log" ] && mv -f "$LOG_DIR/aurivon.log" "$LOG_DIR/aurivon.log.1"
