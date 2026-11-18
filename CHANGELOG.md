@@ -5,6 +5,8 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-18
+
 ### Added
 - Fullscreen everywhere: F11 or the ⛶ button in the top bar. On the player, F, the ⛶ button or a double-click on the video goes fullscreen with the video only (no sidebar, panels or bars; mpv's on-screen controller handles the controls); Esc or F leaves
 - Stream filters in the stream picker: resolution (4K / 1080p / 720p / SD), HDR / Dolby Vision / SDR only, codec (HEVC / AV1 / H.264), audio (5.1+ / Atmos), source (Remux / BluRay / WEB / HDTV), min / max size, Real-Debrid cached only, and CAM / TS releases hidden by default
