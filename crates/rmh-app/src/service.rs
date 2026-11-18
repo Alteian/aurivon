@@ -419,30 +419,19 @@ impl MediaService {
         })
     }
 
-    /// Warm the torrent engine and fetch the metadata of the torrents "Play
-    /// best" would try, while the user is still looking at the list
-    pub fn prefetch(&self, hits: &[StreamHit]) {
-        let magnets: Vec<String> = hits
-            .iter()
-            .filter(|h| !h.rd_cached && h.magnet.starts_with("magnet:"))
-            .take(PREFETCH)
-            .map(|h| h.magnet.clone())
-            .collect();
+    /// Start the torrent engine (DHT bootstrap, local stream server) while
+    /// the user is still looking at the stream list
+    pub fn warm_up_torrents(&self) {
         let torrent = self.inner.torrent.clone();
         self.inner.rt.spawn(async move {
-            let engine = {
-                let mut guard = torrent.lock().await;
-                if guard.is_none() {
-                    let mut engine = TorrentEngine::with_defaults();
-                    if let Err(e) = engine.initialize().await {
-                        tracing::warn!("Torrent engine failed: {e}");
-                        return;
-                    }
-                    *guard = Some(Arc::new(engine));
+            let mut guard = torrent.lock().await;
+            if guard.is_none() {
+                let mut engine = TorrentEngine::with_defaults();
+                match engine.initialize().await {
+                    Ok(()) => *guard = Some(Arc::new(engine)),
+                    Err(e) => tracing::warn!("Torrent engine failed: {e}"),
                 }
-                guard.clone().unwrap()
-            };
-            engine.prefetch(&magnets).await;
+            }
         });
     }
 
@@ -482,11 +471,9 @@ impl MediaService {
 }
 
 /// Real-Debrid candidates checked before falling back to P2P
-const RD_PROBES: usize = 10;
+const RD_PROBES: usize = 6;
 /// Torrents raced against each other
 const P2P_RACE: usize = 4;
-/// Torrents whose metadata is fetched while the picker is open
-const PREFETCH: usize = 3;
 const HEAD_BYTES: u64 = 4 * 1024 * 1024;
 const TAIL_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -505,7 +492,11 @@ async fn fast_start_inner(
     // 1. Real-Debrid
     if let Some(scraper) = scraper.filter(|s| s.has_real_debrid()) {
         set(Some("Checking Real-Debrid cache…".into()));
-        let probe: Vec<(String, Option<u32>)> = candidates.iter().take(RD_PROBES).map(|h| (h.info_hash.clone(), h.file_idx)).collect();
+        let all: Vec<usize> = (0..candidates.len()).collect();
+        let probe: Vec<(String, Option<u32>)> = crate::streams::rd_probe_set(&candidates, &all, RD_PROBES)
+            .into_iter()
+            .map(|i| (candidates[i].info_hash.clone(), candidates[i].file_idx))
+            .collect();
         let cached = scraper.probe_rd(&probe).await;
         for hit in candidates.iter().filter(|h| cached.get(&h.info_hash).copied().unwrap_or(false)) {
             set(Some("Opening Real-Debrid link…".into()));

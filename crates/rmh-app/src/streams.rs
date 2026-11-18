@@ -390,6 +390,22 @@ pub fn apply(hits: &[crate::StreamHit], f: &StreamFilter) -> Vec<usize> {
     idx
 }
 
+/// Which candidates to ask Real-Debrid about (each check is one request
+/// when RD refuses the torrent, four when it accepts it): the first few of
+/// the fast-start order plus the best-quality ones, since a cached link
+/// starts instantly whatever its swarm looks like
+pub fn rd_probe_set(hits: &[crate::StreamHit], order: &[usize], n: usize) -> Vec<usize> {
+    let mut by_quality = order.to_vec();
+    by_quality.sort_by(|a, b| hits[*b].score.cmp(&hits[*a].score));
+    let mut out: Vec<usize> = Vec::with_capacity(n * 2);
+    for i in order.iter().take(n).chain(by_quality.iter().take(n)) {
+        if !out.contains(i) {
+            out.push(*i);
+        }
+    }
+    out
+}
+
 /// "Best match" order: Real-Debrid cached first, then quality, then seeders
 pub fn sort_best(hits: &mut [crate::StreamHit]) {
     hits.sort_by(|a, b| {
@@ -525,6 +541,9 @@ mod tests {
         let order = fast_start_order(&hits, &only_4k);
         assert_eq!(order.len(), 2);
         assert_eq!(Health::of(Some(150)).icon(), "🔥");
+        let all = fast_start_order(&hits, &StreamFilter::default());
+        let probe = rd_probe_set(&hits, &all, 1);
+        assert_eq!(probe, vec![4, 0], "fastest plus the best-quality remux");
     }
 
     #[test]

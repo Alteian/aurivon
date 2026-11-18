@@ -1316,16 +1316,15 @@ impl MediaHubView {
     }
 
     /// Ask Real-Debrid about the few streams "Play best" would try first so
-    /// the picker can show which ones start instantly, and prefetch the
-    /// metadata of the top torrents
+    /// the picker can show which ones start instantly
     fn probe_debrid(&mut self, cx: &mut Context<Self>) {
         let order = rmh_app::streams::fast_start_order(&self.streams, &self.stream_filter);
-        let top: Vec<StreamHit> = order.iter().take(10).map(|i| self.streams[*i].clone()).collect();
-        // Fetch torrent metadata for the likely picks while the list is read
-        self.svc.prefetch(&top);
+        // Bootstrap the DHT while the list is read
+        self.svc.warm_up_torrents();
         if !self.svc.has_real_debrid() {
             return;
         }
+        let top: Vec<StreamHit> = rmh_app::streams::rd_probe_set(&self.streams, &order, 6).into_iter().map(|i| self.streams[i].clone()).collect();
         let fut = self.svc.probe_rd(&top);
         cx.spawn(async move |this, cx| {
             let Ok(map) = fut.await else { return };

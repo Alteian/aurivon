@@ -29,14 +29,6 @@ pub const DEFAULT_TRACKERS: &[&str] = &[
     "udp://tracker.openbittorrent.com:6969/announce",
 ];
 
-/// Lowercase hex info hash of a magnet link
-fn magnet_hash(magnet: &str) -> Option<String> {
-    let lower = magnet.to_lowercase();
-    let start = lower.find("xt=urn:btih:")? + "xt=urn:btih:".len();
-    let hash: String = lower[start..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
-    (hash.len() == 40).then_some(hash)
-}
-
 /// `magnet` plus [`DEFAULT_TRACKERS`] it does not list yet
 pub fn with_default_trackers(magnet: &str) -> String {
     let mut out = magnet.to_string();
@@ -197,29 +189,19 @@ impl TorrentEngine {
         // fallback trackers go into the link itself
         let magnet = &with_default_trackers(magnet);
 
-        // A torrent whose metadata was prefetched is already in the session
-        // (paused): reuse it instead of resolving the magnet again
-        let handle = match self.find_by_magnet(magnet) {
-            Some(h) => h,
-            None => {
-                let add_opts = AddTorrentOptions { initial_peers: None, overwrite: true, ..Default::default() };
-                session
-                    .add_torrent(AddTorrent::from_url(magnet), Some(add_opts))
-                    .await
-                    .map_err(|e| TorrentError::Internal(e.to_string()))?
-                    .into_handle()
-                    .ok_or_else(|| TorrentError::DownloadFailed("Failed to get handle".into()))?
-            }
-        };
+        let add_opts = AddTorrentOptions { initial_peers: None, overwrite: true, ..Default::default() };
+        let handle = session
+            .add_torrent(AddTorrent::from_url(magnet), Some(add_opts))
+            .await
+            .map_err(|e| TorrentError::Internal(e.to_string()))?
+            .into_handle()
+            .ok_or_else(|| TorrentError::DownloadFailed("Failed to get handle".into()))?;
 
         // Wait for metadata
         info!("Waiting for torrent metadata...");
         handle.wait_until_initialized()
             .await
             .map_err(|e| TorrentError::DownloadFailed(e.to_string()))?;
-        if handle.is_paused() {
-            session.unpause(&handle).await.map_err(|e| TorrentError::Internal(e.to_string()))?;
-        }
 
         // Get torrent info using with_metadata
         let (torrent_name, info_hash_bytes, files) = handle
@@ -351,46 +333,6 @@ impl TorrentEngine {
             info: stream_info,
             handle: TorrentHandle { id: torrent_id },
         })
-    }
-
-    /// Session torrent for this magnet's info hash, if any
-    fn find_by_magnet(&self, magnet: &str) -> Option<Arc<ManagedTorrent>> {
-        let session = self.session.as_ref()?;
-        let hash = magnet_hash(magnet)?;
-        session.with_torrents(|it| it.map(|(_, h)| h.clone()).find(|h| hex::encode(h.info_hash().0) == hash))
-    }
-
-    /// Fetch a torrent's metadata in the background without downloading any
-    /// of it (the torrent stays paused), so pressing Play skips the slowest
-    /// step. Earlier prefetches that were never played are dropped.
-    pub async fn prefetch(&self, magnets: &[String]) {
-        let Some(session) = self.session.clone() else { return };
-        let wanted: HashSet<String> = magnets.iter().filter_map(|m| magnet_hash(m)).collect();
-        // Drop stale prefetches (paused and not streaming)
-        let active: HashSet<usize> = self.active_torrents.read().await.values().map(|a| a.handle.id()).collect();
-        let stale: Vec<usize> = session.with_torrents(|it| {
-            it.filter(|(id, h)| !active.contains(id) && h.is_paused() && !wanted.contains(&hex::encode(h.info_hash().0)))
-                .map(|(id, _)| id)
-                .collect()
-        });
-        for id in stale {
-            let _ = session.delete(TorrentIdOrHash::Id(id), true).await;
-        }
-        for m in magnets {
-            if self.find_by_magnet(m).is_some() {
-                continue;
-            }
-            let session = session.clone();
-            let m = with_default_trackers(m);
-            tokio::spawn(async move {
-                let opts = AddTorrentOptions { paused: true, overwrite: true, ..Default::default() };
-                match tokio::time::timeout(Duration::from_secs(120), session.add_torrent(AddTorrent::from_url(&m), Some(opts))).await {
-                    Ok(Ok(_)) => debug!("prefetched metadata for {}", &m[..m.len().min(60)]),
-                    Ok(Err(e)) => debug!("prefetch failed: {e:#}"),
-                    Err(_) => debug!("prefetch timed out"),
-                }
-            });
-        }
     }
 
     /// Unregister every stream (torrents stay in the session)

@@ -10,10 +10,10 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 - Torrent health in the picker: 🔥 100+ seeders, ▲ 25+, ▽ 5+, ✕ fewer; new "Starts fastest" sort
 - Start-up status while a stream starts: checking Real-Debrid, finding peers, then "Buffering 40% · 3.1 MB/s · 18 peers"
 - Up to 4 torrents race each other on Play best; the first one with its first few MB on disk plays, the others are dropped
-- While you look at the stream list, the metadata of the top 3 torrents is fetched in the background (nothing is downloaded), so Play skips that step
+- The torrent engine starts (DHT bootstrap) as soon as the stream list shows, not on the first Play
 
 ### Fixed
-- Real-Debrid cache detection works again. Real-Debrid switched off `instantAvailability` (it now answers "disabled_endpoint"), so every stream showed as P2P and Real-Debrid was never used. The top 10 candidates are now checked the way the RD web UI does it (add the magnet, see if it is instantly "downloaded", delete it again); torrents RD refuses ("infringing_file") count as not cached
+- Real-Debrid cache detection works again. Real-Debrid switched off `instantAvailability` (it now answers "disabled_endpoint"), so every stream showed as P2P and Real-Debrid was never used. Up to 12 candidates (the 6 that start fastest plus the 6 best-quality ones) are now checked the way the RD web UI does it (add the magnet, see if it is instantly "downloaded", delete it again); torrents RD refuses ("infringing_file") count as not cached
 - Torrents find peers much faster: the trackers Torrentio lists for each torrent (and a few public fallback trackers) are now part of the magnet link; before, peers came only from the DHT
 - The right file plays from season packs and torrents with extras (Torrentio's file index is used), and only that file is downloaded
 - Playback starts on data that is already there: the first 4 MiB are buffered before mpv opens the stream and the end of the file (mkv index / mp4 header) is fetched first, instead of mpv stalling on an empty stream

@@ -17,14 +17,6 @@ fn main() -> anyhow::Result<()> {
     let t = Instant::now();
     let hits = block_on(svc.search_streams_for(imdb.clone(), None)).map_err(anyhow::Error::msg)?;
     println!("search: {} hits in {:.2}s", hits.len(), t.elapsed().as_secs_f64());
-    // TTFF_BROWSE=<s>: the picker has been open this long before Play
-    // (the app prefetches metadata of the top candidates meanwhile)
-    if let Some(secs) = std::env::var("TTFF_BROWSE").ok().and_then(|s| s.parse::<u64>().ok()) {
-        let order = rmh_app::streams::fast_start_order(&hits, &svc.config().stream_filter);
-        let top: Vec<_> = order.iter().map(|i| hits[*i].clone()).collect();
-        svc.prefetch(&top);
-        std::thread::sleep(std::time::Duration::from_secs(secs));
-    }
     let t0 = Instant::now();
     let r = if pick == "fast" {
         let order = rmh_app::streams::fast_start_order(&hits, &svc.config().stream_filter);
