@@ -4,7 +4,7 @@
 use crate::service::{is_audio, MediaService, ServiceResult};
 use rmh_core::MediaItem;
 use rmh_database::{MediaLink, MediaRepository};
-use rmh_metadata::{cache_image, parse_release, Details, Episode, Kind, PosterSize, TmdbClient, Title};
+use rmh_metadata::{parse_release, Details, Episode, Kind, PosterSize, TmdbClient, Title};
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -166,7 +166,7 @@ impl MediaService {
                     },
                 };
                 let poster = match title.poster_url(PosterSize::W342) {
-                    Some(url) => cache_image(&http, &url, &images).await.ok(),
+                    Some(url) => crate::images::fetch_image(&http, &url, &images).await.ok(),
                     None => None,
                 };
                 let episode = if title.kind == Kind::Tv {
@@ -251,7 +251,7 @@ impl MediaService {
         self.run(async move {
             let d = tmdb?.details(kind, tmdb_id).await.map_err(|e| format!("{e:#}"))?;
             let backdrop = match d.title.backdrop_path.as_deref() {
-                Some(b) => cache_image(&http, &TmdbClient::backdrop_url(b, rmh_metadata::BackdropSize::W780), &images).await.ok(),
+                Some(b) => crate::images::fetch_image(&http, &TmdbClient::backdrop_url(b, rmh_metadata::BackdropSize::W780), &images).await.ok(),
                 None => None,
             };
             Ok((d, backdrop))
@@ -287,21 +287,19 @@ impl MediaService {
     }
 }
 
-pub(crate) async fn with_posters(titles: Vec<Title>, http: &reqwest::Client, dir: &Path) -> Vec<TitleCard> {
-    let mut set = JoinSet::new();
-    for (i, t) in titles.iter().enumerate() {
-        if let Some(url) = t.poster_url(PosterSize::W342) {
-            let (http, dir) = (http.clone(), dir.to_path_buf());
-            set.spawn(async move { (i, cache_image(&http, &url, &dir).await.ok()) });
-        }
-    }
-    let mut posters: HashMap<usize, PathBuf> = HashMap::new();
-    while let Some(Ok((i, p))) = set.join_next().await {
-        if let Some(p) = p {
-            posters.insert(i, p);
-        }
-    }
-    titles.into_iter().enumerate().map(|(i, title)| TitleCard { poster: posters.remove(&i), title }).collect()
+/// Cards for `titles`, with posters only where they are already on disk.
+/// Nothing is downloaded here: the UI fetches posters lazily as cards scroll
+/// into view (see [`MediaService::image`]).
+pub(crate) async fn with_posters(titles: Vec<Title>, _http: &reqwest::Client, dir: &Path) -> Vec<TitleCard> {
+    titles
+        .into_iter()
+        .map(|title| {
+            let poster = crate::images::poster_url(&title)
+                .map(|u| rmh_metadata::cached_image_path(&u, dir))
+                .filter(|p| p.exists());
+            TitleCard { poster, title }
+        })
+        .collect()
 }
 
 impl MediaService {

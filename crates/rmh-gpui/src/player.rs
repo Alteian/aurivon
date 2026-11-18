@@ -16,7 +16,7 @@ use crate::view::{MediaHubView, SideTab};
 const SPEEDS: [f64; 8] = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0];
 
 impl MediaHubView {
-    fn icon_btn(&self, id: &'static str, label: &'static str, tip: &'static str, p: Palette) -> Stateful<Div> {
+    pub(crate) fn icon_btn(&self, id: &'static str, label: &'static str, tip: &'static str, p: Palette) -> Stateful<Div> {
         div()
             .id(id)
             .min_w(px(36.0))
@@ -566,7 +566,9 @@ impl MediaHubView {
                     .child(div().flex_1().min_w_0().flex().flex_col().child(self.video_area(p, window)))
                     .when(!self.theater, |d| d.child(self.side_panel(p, cx))),
             )
-            .child(self.control_bar(p, cx))
+            // Fullscreen: video only. mpv's on-screen controller takes over the
+            // controls (keys keep working); without it the bar stays.
+            .when(!(self.theater && self.embedded() && self.svc.config().mpv_osc), |d| d.child(self.control_bar(p, cx)))
             .into_any_element()
     }
 }

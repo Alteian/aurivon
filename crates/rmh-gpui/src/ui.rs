@@ -306,7 +306,7 @@ impl MediaHubView {
                     .border_color(rgb(if sel { p.text } else { p.border_soft }))
                     .when(sel, |d| d.shadow_lg())
                     .hover(|s| s.border_color(rgb(p.accent)))
-                    .child(poster(&t.name, c.poster.clone(), None))
+                    .child(self.lazy_poster(&t.name, c.poster.clone(), rmh_app::images::poster_url(t), None))
                     .when(local, |d| d.child(div().absolute().bottom_2().left_2().child(chip("▶ In library", 0x0F2A1EE6, p.good))))
                     .child(
                         div()
@@ -511,7 +511,7 @@ impl MediaHubView {
             )
     }
 
-    fn top_bar(&self, p: Palette) -> impl IntoElement {
+    fn top_bar(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let title = match self.page {
             Page::Details => self.details.as_ref().map(|d| d.name.clone()).unwrap_or_default(),
             Page::Person => self.disc.person.as_ref().map(|d| d.name.clone()).unwrap_or_default(),
@@ -545,7 +545,16 @@ impl MediaHubView {
                     .when_some(self.busy.clone(), |d, b| d.child(div().size(px(8.0)).rounded_full().bg(rgb(p.warn))).child(b))
                     .when(self.busy.is_none(), |d| {
                         d.when_some(self.status.clone(), |d, s| d.child(div().size(px(8.0)).rounded_full().bg(rgb(p.good))).child(s))
-                    }),
+                    })
+                    .child(
+                        self.icon_btn(
+                            "top-fullscreen",
+                            if self.app_fullscreen || self.theater { "⤡" } else { "⛶" },
+                            "Fullscreen (F11, Esc to leave)",
+                            p,
+                        )
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_fullscreen(window, cx))),
+                    ),
             )
     }
 
@@ -672,7 +681,7 @@ impl Render for MediaHubView {
                 .flex_col()
                 .h_full()
                 .min_w_0()
-                .when(!self.theater, |d| d.child(self.top_bar(p)))
+                .when(!self.theater, |d| d.child(self.top_bar(p, cx)))
                 .child(self.player_page(p, window, cx))
                 .into_any_element()
         } else {
@@ -692,7 +701,7 @@ impl Render for MediaHubView {
                 .flex_col()
                 .h_full()
                 .min_w_0()
-                .child(self.top_bar(p))
+                .child(self.top_bar(p, cx))
                 .when_some(self.update_banner(p, cx), |d, b| d.child(b))
                 .child(div().id("content").flex_1().w_full().overflow_y_scrollbar().child(div().px_8().py_6().child(content)))
                 .when(self.now.is_some(), |d| d.child(self.mini_player(p, cx)))

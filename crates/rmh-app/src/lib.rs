@@ -9,6 +9,8 @@ pub mod calendar;
 pub mod catalog;
 pub mod discovery;
 pub mod fuzzy;
+pub mod images;
+pub mod streams;
 pub mod social;
 pub mod subs;
 pub mod watchlist;
@@ -26,6 +28,7 @@ pub use discovery::{
     library_ids, search_library, BrowseResults, BrowseSort, CastMember, Credit, DiscoverQuery, Extras, Facets, Genre, ListKind,
     PersonHit, PersonPage, Provider, SearchHits, TitleExtras, Video,
 };
+pub use streams::{AudioFilter, Codec, HdrFilter, Resolution, Source, StreamFilter, StreamSort, StreamTraits};
 pub use social::{ServiceStatus, SimklPin, WatchEvent};
 pub use subs::{SubContext, SubtitleHit};
 pub use watchlist::WatchItem;

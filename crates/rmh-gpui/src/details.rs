@@ -17,8 +17,70 @@ impl MediaHubView {
         if self.streams.is_empty() {
             return div().into_any_element();
         }
+        let f = &self.stream_filter;
+        let shown = rmh_app::streams::apply(&self.streams, f);
+        let hidden = self.streams.len() - shown.len();
+        let full = self.stream_filters_open;
+        let saved = self.svc.config().stream_filter == *f;
+
+        let toolbar = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                self.button("sf-more", if full { "Fewer filters ▴" } else { "More filters ▾" }, false, p)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                        this.stream_filters_open = !this.stream_filters_open;
+                        cx.notify();
+                    })),
+            )
+            .when(f.is_active(), |d| {
+                d.child(self.button("sf-clear", "Clear filters", false, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                    let sort = this.stream_filter.sort;
+                    this.stream_filter = rmh_app::StreamFilter { sort, ..Default::default() };
+                    cx.notify();
+                })))
+            })
+            .when(!saved, |d| {
+                d.child(self.button("sf-save", "Save as default", false, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                    let f = this.stream_filter.clone();
+                    this.update_config(move |c| c.stream_filter = f, false, cx);
+                    this.status = Some("Stream filters saved as default".into());
+                })))
+            })
+            .child(div().flex_1())
+            .child(div().text_xs().text_color(rgb(p.muted)).child(if hidden > 0 {
+                format!("{} shown · {hidden} hidden by filters", shown.len())
+            } else {
+                format!("{} streams", shown.len())
+            }));
+
         let mut rows = div().flex().flex_col().gap_1();
-        for (i, s) in self.streams.iter().enumerate().take(60) {
+        if shown.is_empty() {
+            rows = rows.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_4()
+                    .py_3()
+                    .rounded_lg()
+                    .bg(rgb(p.surface))
+                    .text_sm()
+                    .text_color(rgb(p.muted))
+                    .child(format!("No stream matches these filters ({hidden} hidden)."))
+                    .child(self.button("sf-showall", "Show all", true, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                        let sort = this.stream_filter.sort;
+                        this.stream_filter = rmh_app::StreamFilter { sort, hide_cam: false, ..Default::default() };
+                        cx.notify();
+                    }))),
+            );
+        }
+        let more = shown.len().saturating_sub(80);
+        for i in shown.into_iter().take(80) {
+            let s = &self.streams[i];
+            let badges = s.traits.badges();
+            let quality = if badges.is_empty() { s.quality.clone() } else { badges.join(" · ") };
             rows = rows.child(
                 div()
                     .id(SharedString::from(format!("stream-{i}")))
@@ -40,14 +102,35 @@ impl MediaHubView {
                             .text_color(rgb(if s.rd_cached { p.good } else { p.muted }))
                             .child(if s.rd_cached { "⚡ RD" } else { "P2P" }),
                     )
-                    .child(div().w(px(190.0)).text_sm().truncate().child(s.quality.clone()))
+                    .child(div().w(px(230.0)).text_sm().truncate().child(quality))
                     .child(div().w(px(80.0)).text_xs().text_color(rgb(p.muted)).child(s.size.clone().unwrap_or_default()))
                     .child(div().w(px(60.0)).text_xs().text_color(rgb(p.muted)).child(s.seeders.map(|n| format!("▲ {n}")).unwrap_or_default()))
                     .child(div().flex_1().min_w_0().text_xs().text_color(rgb(p.faint)).truncate().child(s.title.clone()))
                     .child(div().text_sm().text_color(rgb(p.accent)).child("Play ▶")),
             );
         }
-        self.section(format!("Streams for {label}"), Some(format!("{}", self.streams.len())), rows.into_any_element(), p)
+        if more > 0 {
+            rows = rows.child(div().px_4().py_2().text_xs().text_color(rgb(p.faint)).child(format!("+ {more} more — narrow the filters to see them")));
+        }
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_4()
+                    .rounded_xl()
+                    .bg(rgb(p.surface))
+                    .border_1()
+                    .border_color(rgb(p.border_soft))
+                    .child(self.stream_filter_panel(f, crate::filters::FilterTarget::Picker, full, p, cx))
+                    .child(toolbar),
+            )
+            .child(rows);
+        self.section(format!("Streams for {label}"), Some(format!("{}", self.streams.len())), body.into_any_element(), p)
     }
 
     pub(crate) fn details_page(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
@@ -138,7 +221,7 @@ impl MediaHubView {
                     .flex()
                     .gap_8()
                     .p_8()
-                    .child(div().w(px(190.0)).h(px(285.0)).flex_none().rounded_xl().overflow_hidden().shadow_lg().child(poster(&name, d.poster.clone(), None)))
+                    .child(div().w(px(190.0)).h(px(285.0)).flex_none().rounded_xl().overflow_hidden().shadow_lg().child(self.lazy_poster(&name, d.poster.clone(), title.as_ref().and_then(rmh_app::images::poster_url), None)))
                     .child(
                         div()
                             .flex_1()

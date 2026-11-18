@@ -465,15 +465,24 @@ fn best_match(hits: Vec<Title>, title: &str, year: Option<u16>) -> Option<Title>
     hits.into_iter().nth(best)
 }
 
-/// Download a TMDB image once into `cache_dir`; returns the local file.
-pub async fn cache_image(client: &reqwest::Client, url: &str, cache_dir: &Path) -> Result<PathBuf> {
+/// Where [`cache_image`] stores `url` (the file may not exist yet).
+pub fn cached_image_path(url: &str, cache_dir: &Path) -> PathBuf {
     let name: String = url
         .trim_start_matches("https://image.tmdb.org/t/p/")
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '.' { c } else { '_' })
         .collect();
-    let path = cache_dir.join(name);
+    cache_dir.join(name)
+}
+
+/// Download a TMDB image once into `cache_dir`; returns the local file.
+pub async fn cache_image(client: &reqwest::Client, url: &str, cache_dir: &Path) -> Result<PathBuf> {
+    let path = cached_image_path(url, cache_dir);
     if path.exists() {
+        // bump the mtime so the size-capped cache evicts least recently used first
+        if let Ok(f) = std::fs::File::options().append(true).open(&path) {
+            let _ = f.set_modified(std::time::SystemTime::now());
+        }
         return Ok(path);
     }
     std::fs::create_dir_all(cache_dir)?;

@@ -76,6 +76,16 @@ pub fn month_grid(year: i32, month: u32) -> (NaiveDate, NaiveDate) {
 }
 
 /// UTC timestamp or plain date → local (date, time)
+/// First and last day of a month
+pub fn month_range(year: i32, month: u32) -> (NaiveDate, NaiveDate) {
+    let first = NaiveDate::from_ymd_opt(year, month, 1).unwrap_or_default();
+    let next = if month == 12 { NaiveDate::from_ymd_opt(year + 1, 1, 1) } else { NaiveDate::from_ymd_opt(year, month + 1, 1) };
+    (first, next.map(|n| n - chrono::Duration::days(1)).unwrap_or(first))
+}
+
+/// Parallel TMDB metadata lookups while building a calendar month
+const CALENDAR_PARALLEL: usize = 8;
+
 pub fn to_local(when: &str, tz: chrono_tz::Tz) -> Option<(NaiveDate, Option<String>)> {
     if when.len() == 10 {
         return NaiveDate::parse_from_str(when, "%Y-%m-%d").ok().map(|d| (d, None));
@@ -124,7 +134,9 @@ impl MediaService {
                     }
                 }
             }
-            let (start, end) = month_grid(year, month);
+            // Only the month itself is fetched; the grid's leading/trailing days
+            // from neighbouring months stay empty (fewer TMDB/Trakt requests).
+            let (start, end) = month_range(year, month);
             let tmdb = tmdb?;
             let mut items = if use_trakt {
                 trakt_items(trakt.as_ref().unwrap(), start, end, tz).await?
@@ -139,7 +151,7 @@ impl MediaService {
             items.retain(|i| i.date >= start && i.date <= end);
             attach_posters(&tmdb, &http, &images, &mut items).await;
             items.sort_by(|a, b| a.date.cmp(&b.date).then(b.mine.cmp(&a.mine)).then(a.time.cmp(&b.time)).then(a.name.cmp(&b.name)));
-            let month = CalendarMonth { year, month, grid_start: Some(start), items, source: source.into() };
+            let month = CalendarMonth { year, month, grid_start: Some(month_grid(year, month).0), items, source: source.into() };
             if let Some(d) = cache.parent() {
                 let _ = std::fs::create_dir_all(d);
             }
@@ -244,11 +256,14 @@ async fn tmdb_items(
             }
         }
     }
+    let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(CALENDAR_PARALLEL));
     let mut set = JoinSet::new();
     for (t, rk) in movies {
         let tmdb = tmdb.clone();
         let region = region.to_string();
+        let permits = permits.clone();
         set.spawn(async move {
+            let _p = permits.acquire_owned().await;
             let dates = tmdb.release_dates(t.tmdb_id, &region).await.unwrap_or_default();
             (t, rk, dates)
         });
@@ -289,7 +304,9 @@ async fn tmdb_items(
     for id in shows {
         let tmdb = tmdb.clone();
         let (from, to) = (from.clone(), to.clone());
+        let permits = permits.clone();
         set.spawn(async move {
+            let _p = permits.acquire_owned().await;
             let eps = tmdb.episodes_airing(id, &from, &to).await.unwrap_or_default();
             let title = if eps.is_empty() { None } else { tmdb.details(Kind::Tv, id).await.ok().map(|d| d.title) };
             (id, title, eps)
@@ -326,7 +343,7 @@ async fn attach_posters(tmdb: &TmdbClient, http: &reqwest::Client, images: &std:
         s.into_iter().take(160).collect()
     };
     let mut titles: HashMap<(Kind, i32), Title> = HashMap::new();
-    for chunk in missing.chunks(16) {
+    for chunk in missing.chunks(CALENDAR_PARALLEL) {
         let mut set = JoinSet::new();
         for (k, id) in chunk.iter().copied() {
             let tmdb = tmdb.clone();
@@ -369,6 +386,9 @@ mod tests {
         let (s, e) = month_grid(2026, 11);
         assert_eq!(s, NaiveDate::from_ymd_opt(2026, 10, 26).unwrap()); // Monday
         assert_eq!((e - s).num_days(), 41);
+        assert_eq!(month_range(2026, 11), (NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(), NaiveDate::from_ymd_opt(2026, 11, 30).unwrap()));
+        assert_eq!(month_range(2026, 12).1, NaiveDate::from_ymd_opt(2026, 12, 31).unwrap());
+        assert_eq!(month_range(2028, 2).1, NaiveDate::from_ymd_opt(2028, 2, 29).unwrap());
         // 02:00 UTC in November = 03:00 in Prague (CET)
         let (d, t) = to_local("2026-11-20T02:00:00.000Z", chrono_tz::Europe::Prague).unwrap();
         assert_eq!(d, NaiveDate::from_ymd_opt(2026, 11, 20).unwrap());

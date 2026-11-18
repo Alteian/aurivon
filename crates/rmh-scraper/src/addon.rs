@@ -37,7 +37,8 @@ impl Default for ScraperAddonConfig {
             real_debrid_api_key: None,
             enable_torrentio: true,
             min_seeders: 0,
-            max_results: 50,
+            // keep every result: the stream picker filters and sorts them
+            max_results: 500,
         }
     }
 }

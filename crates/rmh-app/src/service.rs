@@ -57,7 +57,9 @@ pub struct StreamHit {
     pub rd_cached: bool,
     pub magnet: String,
     pub info_hash: String,
-    score: u32,
+    /// Resolution, HDR, codec, audio, source and size parsed from the name
+    pub traits: crate::streams::StreamTraits,
+    pub(crate) score: u32,
 }
 
 impl From<&ScrapedResult> for StreamHit {
@@ -71,6 +73,7 @@ impl From<&ScrapedResult> for StreamHit {
             rd_cached: r.rd_cached,
             magnet: r.magnet.clone(),
             info_hash: r.info_hash.clone(),
+            traits: crate::streams::StreamTraits::parse(&r.title, r.size.or_else(|| r.size_str.as_deref().and_then(crate::streams::parse_size))),
             score: r.parsed.quality_score(),
         }
     }

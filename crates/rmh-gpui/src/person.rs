@@ -148,7 +148,7 @@ impl MediaHubView {
                     .hover(|s| s.bg(rgb(p.surface_raised)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_title(&c, None, window, cx)))
                     .child(div().w(px(44.0)).text_sm().text_color(rgb(p.muted)).child(t.year.map(|y| y.to_string()).unwrap_or_else(|| "—".into())))
-                    .child(div().w(px(32.0)).h(px(48.0)).flex_none().rounded_md().overflow_hidden().child(poster(&t.name, card.poster.clone(), None)))
+                    .child(div().w(px(32.0)).h(px(48.0)).flex_none().rounded_md().overflow_hidden().child(self.lazy_poster(&t.name, card.poster.clone(), rmh_app::images::thumb_url(t), None)))
                     .child(
                         div()
                             .flex_1()

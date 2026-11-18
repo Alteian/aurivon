@@ -4,7 +4,7 @@
 use crate::catalog::{with_posters, LibraryEntry, TitleCard};
 use crate::fuzzy;
 use crate::service::{is_audio, MediaService, ServiceResult};
-use rmh_metadata::{cache_image, Kind, TmdbClient, Title};
+use rmh_metadata::{Kind, TmdbClient, Title};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -95,7 +95,7 @@ async fn cache_many(http: &reqwest::Client, dir: &Path, items: Vec<(i32, String)
     let mut set = JoinSet::new();
     for (id, url) in items {
         let (http, dir) = (http.clone(), dir.to_path_buf());
-        set.spawn(async move { (id, cache_image(&http, &url, &dir).await.ok()) });
+        set.spawn(async move { (id, crate::images::fetch_image(&http, &url, &dir).await.ok()) });
     }
     let mut out = HashMap::new();
     while let Some(Ok((id, p))) = set.join_next().await {
@@ -301,7 +301,7 @@ impl MediaService {
         self.run(async move {
             let person = tmdb?.person(id).await.map_err(|e| format!("{e:#}"))?;
             let photo = match person.profile_path.as_deref() {
-                Some(p) => cache_image(&http, &TmdbClient::profile_url(p).replace("/w185", "/h632"), &images).await.ok(),
+                Some(p) => crate::images::fetch_image(&http, &TmdbClient::profile_url(p).replace("/w185", "/h632"), &images).await.ok(),
                 None => None,
             };
             let mut known: Vec<&Credit> = person.credits.iter().filter(|c| c.title.poster_path.is_some()).collect();

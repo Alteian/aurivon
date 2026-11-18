@@ -83,6 +83,18 @@ pub struct AppConfig {
     /// Offer pre-releases (e.g. 0.3.0-beta.1) too
     #[serde(default)]
     pub update_prereleases: bool,
+
+    /// Disk cap for cached posters, backdrops and seek previews (MB); the least
+    /// recently used images are removed first. Library posters are kept.
+    #[serde(default = "default_image_cache_mb")]
+    pub image_cache_mb: u32,
+    /// Default stream picker filters and sort
+    #[serde(default)]
+    pub stream_filter: crate::streams::StreamFilter,
+}
+
+fn default_image_cache_mb() -> u32 {
+    250
 }
 
 fn default_tz() -> String {
@@ -185,6 +197,8 @@ impl Default for AppConfig {
             anilist_sync: true,
             auto_update: true,
             update_prereleases: false,
+            image_cache_mb: default_image_cache_mb(),
+            stream_filter: Default::default(),
         }
     }
 }

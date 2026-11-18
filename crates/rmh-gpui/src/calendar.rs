@@ -7,7 +7,7 @@ use rmh_app::{month_grid, CalendarItem, ReleaseKind, TitleCard};
 
 use crate::disc::{CalRelease, CalTypes, CalView};
 use crate::theme::Palette;
-use crate::ui::{chip, poster};
+use crate::ui::chip;
 use crate::view::MediaHubView;
 
 const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -241,7 +241,7 @@ impl MediaHubView {
             .border_color(rgb(if highlighted { p.accent } else { p.border_soft }))
             .hover(|s| s.bg(rgb(p.surface_raised)))
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_calendar_item(&item, window, cx)))
-            .child(div().w(px(40.0)).h(px(60.0)).flex_none().rounded_md().overflow_hidden().child(poster(&it.name, it.poster.clone(), None)))
+            .child(div().w(px(40.0)).h(px(60.0)).flex_none().rounded_md().overflow_hidden().child(self.lazy_poster(&it.name, it.poster.clone(), it.title.as_ref().and_then(rmh_app::images::thumb_url), None)))
             .child(
                 div()
                     .flex_1()

@@ -243,7 +243,7 @@ impl MediaHubView {
                 if self.svc.has_real_debrid() { "Real-Debrid: configured" } else { "Real-Debrid: not configured (P2P only)" }.into(),
             ))
             .child(div().text_xs().text_color(rgb(p.faint)).child(
-                "Keys: Ctrl+K or / search · Space/K play · ←/→ 10 s (Shift 60 s) · ↑/↓ volume · ,/. frame · [/] speed · PgUp/PgDn next/prev chapter · I skip intro · A audio · J subtitles · O OpenSubtitles · T panel tab · N next episode · F fullscreen · M mute · S stop · Enter resume · Ctrl+1–6 pages · Ctrl+L home layout · Ctrl+I details",
+                "Keys: Ctrl+K or / search · Space/K play · ←/→ 10 s (Shift 60 s) · ↑/↓ volume · ,/. frame · [/] speed · PgUp/PgDn next/prev chapter · I skip intro · A audio · J subtitles · O OpenSubtitles · T panel tab · N next episode · F fullscreen (player) · F11 fullscreen (anywhere) · M mute · S stop · Enter resume · Ctrl+1–6 pages · Ctrl+L home layout · Ctrl+I details",
             ));
 
         div()
@@ -256,6 +256,8 @@ impl MediaHubView {
             .child(player)
             .child(services)
             .child(self.more_services(p, cx))
+            .child(self.stream_filter_card(p, cx))
+            .child(self.cache_card(p, cx))
             .child(self.updates_card(p, cx))
             .child(status)
             .into_any_element()

@@ -162,6 +162,14 @@ pub struct MediaHubView {
     pub(crate) volume: f64,
     pub(crate) side_tab: SideTab,
     pub(crate) theater: bool,
+    /// F11: the whole app fullscreen (theater also goes fullscreen on its own)
+    pub(crate) app_fullscreen: bool,
+    pub(crate) lazy: crate::lazy::LazyImages,
+    /// Stream picker filter (starts from the default saved in Settings)
+    pub(crate) stream_filter: rmh_app::StreamFilter,
+    pub(crate) stream_filters_open: bool,
+    /// Image cache size, refreshed when Settings opens
+    pub(crate) image_cache: Option<rmh_app::images::CacheUsage>,
     pub(crate) video: Option<Rc<VideoHost>>,
     pub(crate) video_checked: bool,
     pub(crate) mpv_version: Option<String>,
@@ -292,6 +300,11 @@ impl MediaHubView {
             volume,
             side_tab: SideTab::Chapters,
             theater: false,
+            app_fullscreen: false,
+            lazy: Default::default(),
+            stream_filter: config.stream_filter.clone(),
+            stream_filters_open: false,
+            image_cache: None,
             video: None,
             video_checked: false,
             disc,
@@ -301,7 +314,11 @@ impl MediaHubView {
             _subscriptions: subscriptions,
         };
         view.reload(cx);
-        view.load_trending(cx);
+        // Trending (+ hero backdrop) is only shown on the Discover home layout
+        if view.svc.config().home_layout == HomeLayout::Discover {
+            view.load_trending(cx);
+        }
+        view.prune_image_cache(cx);
         view.refresh_trakt(cx);
         view.refresh_social(cx);
         if view.disc.search.open {
@@ -455,6 +472,7 @@ impl MediaHubView {
         match page {
             Page::Discover => self.ensure_browse(cx),
             Page::Calendar => self.load_calendar(false, cx),
+            Page::Settings => self.refresh_cache_usage(),
             _ => {}
         }
         window.focus(&self.focus_handle, cx);
@@ -836,11 +854,49 @@ impl MediaHubView {
     pub(crate) fn set_theater(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.theater != on {
             self.theater = on;
-            if window.is_fullscreen() != on {
-                window.toggle_fullscreen();
+            self.sync_window_fullscreen(window);
+            // keep mpv's own flag in step so its double-click / F toggles agree
+            if self.embedded() && self.now.is_some() && self.snap.fullscreen != on {
+                self.snap.fullscreen = on;
+                let _ = self.player.set_fullscreen(on);
+            }
+            if on && self.now.is_some() {
+                let _ = self.player.show_text("Fullscreen · Esc or F to leave");
             }
             cx.notify();
         }
+    }
+
+    /// The window is fullscreen while the app (F11) or the player asks for it
+    fn sync_window_fullscreen(&self, window: &mut Window) {
+        let want = self.theater || self.app_fullscreen;
+        if window.is_fullscreen() != want {
+            window.toggle_fullscreen();
+        }
+    }
+
+    /// F11 / the ⛶ button: fullscreen everywhere. On the player page this is
+    /// the same as the player's fullscreen (video only, no app chrome).
+    pub(crate) fn toggle_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page == Page::Player && self.now.is_some() {
+            let on = !self.theater;
+            self.app_fullscreen = false;
+            self.set_theater(on, window, cx);
+            return;
+        }
+        self.app_fullscreen = !self.app_fullscreen;
+        self.sync_window_fullscreen(window);
+        cx.notify();
+    }
+
+    fn prune_image_cache(&mut self, cx: &mut Context<Self>) {
+        let fut = self.svc.prune_image_cache(None);
+        cx.spawn(async move |_, _| {
+            if let Err(e) = fut.await {
+                tracing::warn!("Image cache cleanup failed: {e}");
+            }
+        })
+        .detach();
     }
 
     pub(crate) fn stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -918,6 +974,7 @@ impl MediaHubView {
     }
 
     pub(crate) fn on_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pump_images(cx);
         let Some(now) = self.now.as_mut() else { return };
         let mut snap = self.player.snapshot();
         // Paused and then seeked to the very end: mpv may not report eof-reached
@@ -1452,6 +1509,11 @@ impl MediaHubView {
 
     pub(crate) fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
+        if ks.key == "f11" {
+            self.toggle_fullscreen(window, cx);
+            cx.stop_propagation();
+            return;
+        }
         if self.disc.search.open {
             if ks.key == "escape" {
                 self.close_search(window, cx);
@@ -1534,6 +1596,10 @@ impl MediaHubView {
         if ks.key == "escape" {
             if self.theater {
                 self.set_theater(false, window, cx);
+            } else if self.app_fullscreen {
+                self.app_fullscreen = false;
+                self.sync_window_fullscreen(window);
+                cx.notify();
             }
             window.focus(&self.focus_handle, cx);
             return;

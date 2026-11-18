@@ -167,7 +167,7 @@ impl MediaHubView {
                     .items_end()
                     .gap_6()
                     .p_8()
-                    .child(div().w(px(150.0)).h(px(225.0)).flex_none().rounded_xl().overflow_hidden().shadow_lg().child(poster(&t.name, top.poster.clone(), None)))
+                    .child(div().w(px(150.0)).h(px(225.0)).flex_none().rounded_xl().overflow_hidden().shadow_lg().child(self.lazy_poster(&t.name, top.poster.clone(), rmh_app::images::poster_url(&t), None)))
                     .child(
                         div()
                             .flex()

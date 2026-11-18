@@ -8,7 +8,7 @@ use rmh_app::TitleKind;
 
 use crate::disc::{SearchDown, SearchItem, SearchUp};
 use crate::theme::Palette;
-use crate::ui::{chip, poster};
+use crate::ui::chip;
 use crate::view::MediaHubView;
 
 impl MediaHubView {
@@ -69,6 +69,10 @@ impl MediaHubView {
                     (h.card.name.clone(), h.photo.clone(), h.card.name.clone(), [dept, known].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · "), None, true)
                 }
             };
+            let lazy_url = match item {
+                SearchItem::Title(c) => rmh_app::images::thumb_url(&c.title),
+                _ => None,
+            };
             let it = item.clone();
             list = list.child(
                 div()
@@ -93,7 +97,7 @@ impl MediaHubView {
                             .overflow_hidden()
                             .when(round, |d| d.rounded_full())
                             .when(!round, |d| d.rounded_md())
-                            .child(poster(&seed, img_path, if matches!(item, SearchItem::Imdb(_)) { Some("◎") } else { None })),
+                            .child(self.lazy_poster(&seed, img_path, lazy_url, if matches!(item, SearchItem::Imdb(_)) { Some("◎") } else { None })),
                     )
                     .child(
                         div()
