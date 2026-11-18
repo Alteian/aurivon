@@ -13,6 +13,7 @@ rmh-addon = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true }
+futures = "0.3"
 
 # HTTP client for scraping and Real-Debrid API
 reqwest = { workspace = true }

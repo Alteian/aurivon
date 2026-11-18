@@ -130,8 +130,9 @@ impl ScraperAddon {
             query.episode,
         );
 
-        if let Some(cached) = self.cache.get_results(&cache_key).await {
+        if let Some(mut cached) = self.cache.get_results(&cache_key).await {
             debug!("Returning cached results for {}", cache_key);
+            self.apply_known_rd(&mut cached).await;
             return Ok(cached);
         }
 
@@ -139,10 +140,8 @@ impl ScraperAddon {
         let scrapers = self.scrapers.read().await;
         let mut results = scrapers.search_all(query).await;
 
-        // Check Real-Debrid cache status
-        if let Some(ref rd) = self.real_debrid {
-            results = self.check_rd_cache(rd, results).await;
-        }
+        // Real-Debrid cache status we already know (see `probe_rd`)
+        self.apply_known_rd(&mut results).await;
 
         // Sort by score (RD cached + quality)
         results.sort_by(|a, b| b.score().cmp(&a.score()));
@@ -160,47 +159,55 @@ impl ScraperAddon {
         Ok(results)
     }
 
-    /// Check which results are cached on Real-Debrid
-    async fn check_rd_cache(&self, rd: &RealDebrid, mut results: Vec<ScrapedResult>) -> Vec<ScrapedResult> {
-        // Collect hashes that need checking (skip already known)
-        let mut hashes_to_check = Vec::new();
-        let mut known_cached = HashMap::new();
-
-        for result in &results {
-            if let Some(cached) = self.cache.is_rd_cached(&result.info_hash).await {
-                known_cached.insert(result.info_hash.clone(), cached);
-            } else {
-                hashes_to_check.push(result.info_hash.clone());
+    /// Mark results whose Real-Debrid cache status was probed before
+    async fn apply_known_rd(&self, results: &mut [ScrapedResult]) {
+        if self.real_debrid.is_none() {
+            return;
+        }
+        for r in results.iter_mut() {
+            if let Some(cached) = self.cache.is_rd_cached(&r.info_hash).await {
+                r.rd_cached = cached;
             }
         }
+    }
 
-        // Check unknown hashes with RD
-        if !hashes_to_check.is_empty() {
-            debug!("Checking {} hashes with Real-Debrid", hashes_to_check.len());
-            
-            match rd.check_instant_availability(&hashes_to_check).await {
-                Ok(cached_map) => {
-                    // Update cache and known_cached
-                    for hash in &hashes_to_check {
-                        let is_cached = cached_map.contains_key(&hash.to_lowercase());
-                        self.cache.set_rd_cached(hash, is_cached).await;
-                        known_cached.insert(hash.clone(), is_cached);
-                    }
+    /// Ask Real-Debrid whether these torrents are cached (in parallel, a few
+    /// at a time) and remember the answers. Returns info hash -> cached.
+    ///
+    /// Each probe adds the magnet to the RD account and deletes it again, so
+    /// callers should only pass the handful of candidates they might play.
+    pub async fn probe_rd(&self, items: &[(String, Option<u32>)]) -> HashMap<String, bool> {
+        use futures::stream::{self, StreamExt};
+        let mut out = HashMap::new();
+        let Some(ref rd) = self.real_debrid else { return out };
+        let mut todo = Vec::new();
+        for (hash, idx) in items {
+            match self.cache.is_rd_cached(hash).await {
+                Some(c) => {
+                    out.insert(hash.clone(), c);
                 }
-                Err(e) => {
-                    warn!("Failed to check RD cache: {}", e);
+                None => todo.push((hash.clone(), *idx)),
+            }
+        }
+        let probed: Vec<(String, Option<bool>)> = stream::iter(todo)
+            .map(|(hash, idx)| async move {
+                let r = rd.probe_cached(&hash, idx, false).await;
+                if let Err(ref e) = r {
+                    warn!("Real-Debrid cache probe failed for {hash}: {e}");
                 }
+                (hash, r.ok().map(|p| p.cached))
+            })
+            .buffer_unordered(3)
+            .collect()
+            .await;
+        for (hash, cached) in probed {
+            if let Some(c) = cached {
+                self.cache.set_rd_cached(&hash, c).await;
+                out.insert(hash, c);
             }
         }
-
-        // Update results with cache status
-        for result in &mut results {
-            if let Some(&cached) = known_cached.get(&result.info_hash) {
-                result.rd_cached = cached;
-            }
-        }
-
-        results
+        info!("Real-Debrid: {} of {} probed torrents cached", out.values().filter(|c| **c).count(), out.len());
+        out
     }
 
     /// Get a direct streaming URL for a scraped result
@@ -208,7 +215,7 @@ impl ScraperAddon {
         if let Some(ref rd) = self.real_debrid {
             if result.rd_cached {
                 // Get direct streaming link from RD
-                let stream = rd.get_stream_link(&result.info_hash, None).await?;
+                let stream = rd.get_stream_link(&result.info_hash, result.file_idx).await?;
                 info!("Resolved RD stream: {} ({})", stream.filename, 
                       crate::scrapers::human_readable_size(stream.filesize));
                 return Ok(stream.url);

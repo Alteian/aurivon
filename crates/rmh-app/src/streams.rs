@@ -253,10 +253,13 @@ pub enum StreamSort {
     SizeDesc,
     SizeAsc,
     Seeders,
+    /// Fast-start order: cached first, then torrent health, then quality
+    Hottest,
 }
 
 impl StreamSort {
-    pub const ALL: [StreamSort; 5] = [StreamSort::Best, StreamSort::Resolution, StreamSort::SizeDesc, StreamSort::SizeAsc, StreamSort::Seeders];
+    pub const ALL: [StreamSort; 6] =
+        [StreamSort::Best, StreamSort::Hottest, StreamSort::Resolution, StreamSort::SizeDesc, StreamSort::SizeAsc, StreamSort::Seeders];
     pub fn label(self) -> &'static str {
         match self {
             StreamSort::Best => "Best match",
@@ -264,6 +267,7 @@ impl StreamSort {
             StreamSort::SizeDesc => "Largest",
             StreamSort::SizeAsc => "Smallest",
             StreamSort::Seeders => "Seeders",
+            StreamSort::Hottest => "Starts fastest",
         }
     }
 }
@@ -381,6 +385,103 @@ pub fn apply(hits: &[crate::StreamHit], f: &StreamFilter) -> Vec<usize> {
         StreamSort::SizeDesc => idx.sort_by_key(|i| std::cmp::Reverse(size(i))),
         StreamSort::SizeAsc => idx.sort_by_key(|i| if hits[*i].traits.size_bytes.is_some() { size(i) } else { u64::MAX }),
         StreamSort::Seeders => idx.sort_by_key(|i| std::cmp::Reverse(hits[*i].seeders.unwrap_or(0))),
+        StreamSort::Hottest => sort_hottest(hits, &mut idx),
+    }
+    idx
+}
+
+/// "Best match" order: Real-Debrid cached first, then quality, then seeders
+pub fn sort_best(hits: &mut [crate::StreamHit]) {
+    hits.sort_by(|a, b| {
+        b.rd_cached
+            .cmp(&a.rd_cached)
+            .then(b.score.cmp(&a.score))
+            .then(b.seeders.unwrap_or(0).cmp(&a.seeders.unwrap_or(0)))
+    });
+}
+
+/// How alive a torrent looks, from its seeder count
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Health {
+    Dead,
+    Weak,
+    Good,
+    Hot,
+}
+
+impl Health {
+    pub fn of(seeders: Option<u32>) -> Self {
+        match seeders.unwrap_or(0) {
+            0..=4 => Health::Dead,
+            5..=24 => Health::Weak,
+            25..=99 => Health::Good,
+            _ => Health::Hot,
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            Health::Hot => "🔥",
+            Health::Good => "▲",
+            Health::Weak => "▽",
+            Health::Dead => "✕",
+        }
+    }
+
+    fn lower(self) -> Self {
+        match self {
+            Health::Hot => Health::Good,
+            Health::Good => Health::Weak,
+            _ => Health::Dead,
+        }
+    }
+}
+
+/// Files above this need more bandwidth than most swarms deliver
+const P2P_HEAVY_BYTES: u64 = 30 * 1024 * 1024 * 1024;
+
+/// Health used for the fast-start pick: a cached Real-Debrid link is always
+/// "hot", a huge P2P file counts one step colder (remux bitrates stall)
+pub fn start_health(h: &crate::StreamHit) -> Health {
+    if h.rd_cached {
+        return Health::Hot;
+    }
+    let base = Health::of(h.seeders);
+    if h.traits.size_bytes.is_some_and(|b| b > P2P_HEAVY_BYTES) {
+        base.lower()
+    } else {
+        base
+    }
+}
+
+/// How quickly a stream should start: a bigger swarm counts most (log of the
+/// seeders), quality breaks near-ties, huge P2P files are penalised
+pub fn start_score(h: &crate::StreamHit) -> f64 {
+    let swarm = (h.seeders.unwrap_or(0) as f64 + 1.0).log2();
+    let quality = h.score as f64 / 1000.0;
+    let heavy = if !h.rd_cached && h.traits.size_bytes.is_some_and(|b| b > P2P_HEAVY_BYTES) { 1.5 } else { 0.0 };
+    swarm + 0.6 * quality - heavy
+}
+
+fn sort_hottest(hits: &[crate::StreamHit], idx: &mut [usize]) {
+    idx.sort_by(|a, b| {
+        let (a, b) = (&hits[*a], &hits[*b]);
+        b.rd_cached
+            .cmp(&a.rd_cached)
+            .then(if a.rd_cached { b.score.cmp(&a.score) } else { std::cmp::Ordering::Equal })
+            .then(start_score(b).total_cmp(&start_score(a)))
+    });
+}
+
+/// Candidates for "Play best", in the order they should be tried: streams
+/// that pass the filter, Real-Debrid cached first (best quality first), then
+/// by [`start_score`]. Dead torrents (under 5 seeders) are left out unless nothing
+/// else matches.
+pub fn fast_start_order(hits: &[crate::StreamHit], f: &StreamFilter) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..hits.len()).filter(|i| f.matches(&hits[*i].traits, hits[*i].rd_cached)).collect();
+    sort_hottest(hits, &mut idx);
+    if idx.iter().any(|i| start_health(&hits[*i]) > Health::Dead) {
+        idx.retain(|i| start_health(&hits[*i]) > Health::Dead);
     }
     idx
 }
@@ -388,6 +489,43 @@ pub fn apply(hits: &[crate::StreamHit], f: &StreamFilter) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hit(title: &str, gb: u64, seeders: u32, rd: bool) -> crate::StreamHit {
+        crate::StreamHit {
+            title: title.into(),
+            quality: String::new(),
+            size: None,
+            seeders: Some(seeders),
+            source: "t".into(),
+            rd_cached: rd,
+            magnet: String::new(),
+            info_hash: title.into(),
+            file_idx: None,
+            traits: StreamTraits::parse(title, Some(gb * 1024 * 1024 * 1024)),
+            score: rmh_scraper::parse_torrent_title(title).quality_score(),
+        }
+    }
+
+    #[test]
+    fn fast_start_prefers_cached_then_hot() {
+        let hits = vec![
+            hit("Movie.2021.2160p.BluRay.REMUX.HEVC-FGT", 80, 300, false),
+            hit("Movie.2021.2160p.WEB-DL.HEVC-EVO", 20, 40, false),
+            hit("Movie.2021.1080p.WEB-DL.x264-EVO", 6, 400, false),
+            hit("Movie.2021.1080p.BluRay.x264-OLD", 8, 2, false),
+            hit("Movie.2021.720p.WEB-DL.x264-RD", 3, 1, true),
+        ];
+        let order = fast_start_order(&hits, &StreamFilter::default());
+        assert_eq!(order[0], 4, "cached Real-Debrid link first");
+        assert_eq!(order[1], 2, "then the hot 1080p");
+        assert!(!order.contains(&3), "dead torrent dropped");
+        // 80 GB remux with 300 seeders counts as merely "good" for P2P
+        assert_eq!(start_health(&hits[0]), Health::Good);
+        let only_4k = StreamFilter { resolutions: vec![Resolution::Uhd], ..Default::default() };
+        let order = fast_start_order(&hits, &only_4k);
+        assert_eq!(order.len(), 2);
+        assert_eq!(Health::of(Some(150)).icon(), "🔥");
+    }
 
     #[test]
     fn parses_release_names() {

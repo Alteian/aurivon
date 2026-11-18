@@ -11,6 +11,7 @@ use rmh_metadata::{MovieSearchResult, PosterSize, TmdbClient};
 use rmh_scanner::Scanner;
 use rmh_scraper::{ScrapedResult, ScraperAddon, ScraperAddonConfig, SearchQuery};
 use rmh_torrent::TorrentEngine;
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -57,6 +58,8 @@ pub struct StreamHit {
     pub rd_cached: bool,
     pub magnet: String,
     pub info_hash: String,
+    /// Video file inside the torrent (from the scraper)
+    pub file_idx: Option<u32>,
     /// Resolution, HDR, codec, audio, source and size parsed from the name
     pub traits: crate::streams::StreamTraits,
     pub(crate) score: u32,
@@ -73,6 +76,7 @@ impl From<&ScrapedResult> for StreamHit {
             rd_cached: r.rd_cached,
             magnet: r.magnet.clone(),
             info_hash: r.info_hash.clone(),
+            file_idx: r.file_idx,
             traits: crate::streams::StreamTraits::parse(&r.title, r.size.or_else(|| r.size_str.as_deref().and_then(crate::streams::parse_size))),
             score: r.parsed.quality_score(),
         }
@@ -84,6 +88,12 @@ impl From<&ScrapedResult> for StreamHit {
 pub struct ResolvedStream {
     pub url: String,
     pub title: String,
+    /// Served by Real-Debrid (otherwise the local torrent server or a direct URL)
+    pub debrid: bool,
+    /// Torrent stream id on the local server, if any
+    pub torrent_stream: Option<String>,
+    /// The candidate that won
+    pub hit_title: String,
 }
 
 pub(crate) struct Inner {
@@ -92,7 +102,9 @@ pub(crate) struct Inner {
     pub(crate) db: OnceCell<Database>,
     pub(crate) config: RwLock<AppConfig>,
     pub(crate) scraper: RwLock<Option<Arc<ScraperAddon>>>,
-    pub(crate) torrent: Arc<Mutex<Option<TorrentEngine>>>,
+    pub(crate) torrent: Arc<Mutex<Option<Arc<TorrentEngine>>>>,
+    /// What "Play" is doing right now (checking Real-Debrid, finding peers, buffering)
+    pub(crate) start_status: Arc<RwLock<Option<String>>>,
     pub(crate) trakt: RwLock<Option<rmh_trakt::TraktClient>>,
     pub(crate) http: reqwest::Client,
     /// Poster / still image cache
@@ -162,6 +174,7 @@ impl MediaService {
                 config: RwLock::new(config),
                 scraper: RwLock::new(None),
                 torrent: Arc::new(Mutex::new(None)),
+                start_status: Arc::new(RwLock::new(None)),
                 trakt: RwLock::new(None),
                 http,
                 tmdb_cache: cache_base.join("tmdb"),
@@ -372,48 +385,255 @@ impl MediaService {
                 .await
                 .map_err(|e| format!("Stream search failed: {e}"))?;
             let mut hits: Vec<StreamHit> = results.iter().map(StreamHit::from).collect();
-            hits.sort_by(|a, b| {
-                b.rd_cached
-                    .cmp(&a.rd_cached)
-                    .then(b.score.cmp(&a.score))
-                    .then(b.seeders.unwrap_or(0).cmp(&a.seeders.unwrap_or(0)))
-            });
+            crate::streams::sort_best(&mut hits);
             Ok(hits)
         })
     }
 
-    /// Turn a stream candidate into a URL mpv can play: Real-Debrid direct link
-    /// when cached, otherwise the local torrent streaming server.
+    /// Turn a stream candidate into a URL mpv can play: Real-Debrid direct
+    /// link when it is cached there, otherwise the local torrent server once
+    /// the first few MB are buffered.
     pub fn resolve_stream(&self, hit: &StreamHit) -> impl Future<Output = ServiceResult<ResolvedStream>> + 'static {
-        let hit = hit.clone();
+        self.fast_start(vec![hit.clone()])
+    }
+
+    /// What the current start-up is doing, for a status line
+    pub fn start_status(&self) -> Option<String> {
+        self.inner.start_status.read().ok().and_then(|s| s.clone())
+    }
+
+    /// Check the given candidates against Real-Debrid's cache (each probe adds
+    /// and removes the magnet). Returns info hash -> cached.
+    pub fn probe_rd(&self, hits: &[StreamHit]) -> impl Future<Output = ServiceResult<HashMap<String, bool>>> + 'static {
+        let items: Vec<(String, Option<u32>)> = hits
+            .iter()
+            .filter(|h| !h.magnet.starts_with("http"))
+            .map(|h| (h.info_hash.clone(), h.file_idx))
+            .collect();
         let scraper = self.inner.scraper.read().ok().and_then(|s| s.clone());
+        self.run(async move {
+            match scraper.filter(|s| s.has_real_debrid()) {
+                Some(s) => Ok(s.probe_rd(&items).await),
+                None => Ok(HashMap::new()),
+            }
+        })
+    }
+
+    /// Warm the torrent engine and fetch the metadata of the torrents "Play
+    /// best" would try, while the user is still looking at the list
+    pub fn prefetch(&self, hits: &[StreamHit]) {
+        let magnets: Vec<String> = hits
+            .iter()
+            .filter(|h| !h.rd_cached && h.magnet.starts_with("magnet:"))
+            .take(PREFETCH)
+            .map(|h| h.magnet.clone())
+            .collect();
+        let torrent = self.inner.torrent.clone();
+        self.inner.rt.spawn(async move {
+            let engine = {
+                let mut guard = torrent.lock().await;
+                if guard.is_none() {
+                    let mut engine = TorrentEngine::with_defaults();
+                    if let Err(e) = engine.initialize().await {
+                        tracing::warn!("Torrent engine failed: {e}");
+                        return;
+                    }
+                    *guard = Some(Arc::new(engine));
+                }
+                guard.clone().unwrap()
+            };
+            engine.prefetch(&magnets).await;
+        });
+    }
+
+    /// Stop every torrent stream and delete its data
+    pub fn stop_torrents(&self) -> impl Future<Output = ServiceResult<()>> + 'static {
         let torrent = self.inner.torrent.clone();
         self.run(async move {
-            if hit.magnet.starts_with("http") {
-                return Ok(ResolvedStream { url: hit.magnet.clone(), title: hit.title.clone() });
+            let engine = torrent.lock().await.clone();
+            if let Some(e) = engine {
+                e.remove_all_except(None).await;
             }
-            if hit.rd_cached {
-                if let Some(scraper) = scraper.filter(|s| s.has_real_debrid()) {
-                    let mut r = ScrapedResult::from_hash(&hit.title, &hit.info_hash, &hit.source);
-                    r.rd_cached = true;
-                    r.magnet = hit.magnet.clone();
-                    match scraper.resolve_stream(&r).await {
-                        Ok(url) if url.starts_with("http") => return Ok(ResolvedStream { url, title: hit.title.clone() }),
-                        Ok(_) => {}
-                        Err(e) => tracing::warn!("Real-Debrid resolve failed, falling back to torrent: {e}"),
+            Ok(())
+        })
+    }
+
+    /// Start the first playable stream out of `candidates` (best first):
+    ///
+    /// 1. ask Real-Debrid about the top few and use the best cached one;
+    /// 2. otherwise race the top torrents: each one fetches metadata from
+    ///    its trackers, then buffers the first 4 MiB and last 2 MiB of the
+    ///    video; the first to finish plays, the others are dropped.
+    pub fn fast_start(&self, candidates: Vec<StreamHit>) -> impl Future<Output = ServiceResult<ResolvedStream>> + 'static {
+        let scraper = self.inner.scraper.read().ok().and_then(|s| s.clone());
+        let torrent = self.inner.torrent.clone();
+        let status = self.inner.start_status.clone();
+        self.run(async move {
+            let set = |s: Option<String>| {
+                if let Ok(mut g) = status.write() {
+                    *g = s;
+                }
+            };
+            let r = fast_start_inner(candidates, scraper, torrent, &set).await;
+            set(None);
+            r
+        })
+    }
+}
+
+/// Real-Debrid candidates checked before falling back to P2P
+const RD_PROBES: usize = 10;
+/// Torrents raced against each other
+const P2P_RACE: usize = 4;
+/// Torrents whose metadata is fetched while the picker is open
+const PREFETCH: usize = 3;
+const HEAD_BYTES: u64 = 4 * 1024 * 1024;
+const TAIL_BYTES: u64 = 2 * 1024 * 1024;
+
+async fn fast_start_inner(
+    candidates: Vec<StreamHit>,
+    scraper: Option<Arc<ScraperAddon>>,
+    torrent: Arc<Mutex<Option<Arc<TorrentEngine>>>>,
+    set: &(dyn Fn(Option<String>) + Sync),
+) -> ServiceResult<ResolvedStream> {
+    let started = std::time::Instant::now();
+    let Some(first) = candidates.first() else { return Err("No stream to play".into()) };
+    if first.magnet.starts_with("http") {
+        return Ok(ResolvedStream { url: first.magnet.clone(), title: first.title.clone(), debrid: false, torrent_stream: None, hit_title: first.title.clone() });
+    }
+
+    // 1. Real-Debrid
+    if let Some(scraper) = scraper.filter(|s| s.has_real_debrid()) {
+        set(Some("Checking Real-Debrid cache…".into()));
+        let probe: Vec<(String, Option<u32>)> = candidates.iter().take(RD_PROBES).map(|h| (h.info_hash.clone(), h.file_idx)).collect();
+        let cached = scraper.probe_rd(&probe).await;
+        for hit in candidates.iter().filter(|h| cached.get(&h.info_hash).copied().unwrap_or(false)) {
+            set(Some("Opening Real-Debrid link…".into()));
+            let mut r = ScrapedResult::from_hash(&hit.title, &hit.info_hash, &hit.source);
+            r.rd_cached = true;
+            r.file_idx = hit.file_idx;
+            match scraper.resolve_stream(&r).await {
+                Ok(url) if url.starts_with("http") => {
+                    info!("Fast start: Real-Debrid link for {} in {:.1}s", hit.title, started.elapsed().as_secs_f64());
+                    if let Some(engine) = torrent.lock().await.clone() {
+                        engine.remove_all_except(None).await;
                     }
+                    return Ok(ResolvedStream { url, title: hit.title.clone(), debrid: true, torrent_stream: None, hit_title: hit.title.clone() });
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("Real-Debrid resolve failed, trying the next one: {e}"),
+            }
+        }
+    }
+
+    // 2. P2P race
+    set(Some("Starting torrent engine…".into()));
+    let engine = {
+        let mut guard = torrent.lock().await;
+        if guard.is_none() {
+            let mut engine = TorrentEngine::with_defaults();
+            engine.initialize().await.map_err(|e| format!("Torrent engine failed: {e}"))?;
+            *guard = Some(Arc::new(engine));
+        }
+        guard.clone().unwrap()
+    };
+    engine.stop_streams().await;
+
+    let racers: Vec<StreamHit> = candidates.into_iter().take(P2P_RACE).collect();
+    let n = racers.len();
+    let progress: Arc<RwLock<Vec<Racer>>> = Arc::new(RwLock::new(vec![Racer::default(); n]));
+    let race = futures::future::select_ok(racers.into_iter().enumerate().map(|(i, hit)| {
+        let engine = engine.clone();
+        let progress = progress.clone();
+        Box::pin(async move {
+            let stream = tokio::time::timeout(
+                std::time::Duration::from_secs(90),
+                engine.add_magnet(&hit.magnet, hit.file_idx.map(|i| i as usize)),
+            )
+            .await
+            .map_err(|_| format!("{}: no metadata after 90 s", hit.title))?
+            .map_err(|e| format!("{}: {e}", hit.title))?;
+            let id = stream.info.id.clone();
+            info!("Fast start: metadata for {} after {:.1}s", hit.title, started.elapsed().as_secs_f64());
+            let p = progress.clone();
+            let buffered = tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                engine.prebuffer(&id, HEAD_BYTES, TAIL_BYTES, move |b| {
+                    if let Ok(mut v) = p.write() {
+                        v[i] = Racer { buffer: Some(b) };
+                    }
+                }),
+            )
+            .await;
+            match buffered {
+                Ok(Ok(())) => Ok((hit, stream)),
+                Ok(Err(e)) => {
+                    engine.remove_stream(&id).await;
+                    Err(format!("{}: {e}", hit.title))
+                }
+                Err(_) => {
+                    engine.remove_stream(&id).await;
+                    Err(format!("{}: too slow to buffer", hit.title))
                 }
             }
-            let mut guard = torrent.lock().await;
-            if guard.is_none() {
-                let mut engine = TorrentEngine::with_defaults();
-                engine.initialize().await.map_err(|e| format!("Torrent engine failed: {e}"))?;
-                *guard = Some(engine);
-            }
-            let engine = guard.as_ref().unwrap();
-            let stream = engine.add_magnet(&hit.magnet, None).await.map_err(|e| format!("Torrent failed: {e}"))?;
-            Ok(ResolvedStream { url: stream.info.stream_url.clone(), title: stream.info.filename.clone() })
         })
+    }));
+    tokio::pin!(race);
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
+    let won = loop {
+        tokio::select! {
+            r = &mut race => break r,
+            _ = tick.tick() => {
+                let v = progress.read().map(|v| v.clone()).unwrap_or_default();
+                set(Some(race_status(&v, started.elapsed().as_secs())));
+            }
+        }
+    };
+    match won {
+        Ok(((hit, stream), _rest)) => {
+            // Losers are dropped mid-flight: clean their torrents up
+            engine.remove_all_except(Some(&stream.info.id)).await;
+            info!("Fast start: torrent {} buffered in {:.1}s", hit.title, started.elapsed().as_secs_f64());
+            Ok(ResolvedStream {
+                url: stream.info.stream_url.clone(),
+                title: stream.info.filename.clone(),
+                debrid: false,
+                torrent_stream: Some(stream.info.id.clone()),
+                hit_title: hit.title,
+            })
+        }
+        Err(e) => {
+            engine.remove_all_except(None).await;
+            Err(format!("Could not start any stream ({e})"))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct Racer {
+    buffer: Option<rmh_torrent::BufferProgress>,
+}
+
+/// One status line for the torrents racing to start
+fn race_status(racers: &[Racer], secs: u64) -> String {
+    let best = racers
+        .iter()
+        .filter_map(|r| r.buffer)
+        .max_by_key(|b| (b.buffered * 1000).checked_div(b.target).unwrap_or(1000));
+    match best {
+        Some(b) => {
+            let pct = (b.buffered * 100).checked_div(b.target).unwrap_or(100).min(100);
+            format!(
+                "Buffering {pct}% · {:.1} MB/s · {} peers{}",
+                b.download_speed as f64 / 1_000_000.0,
+                b.peers,
+                if b.seen > b.peers { format!(" ({} found)", b.seen) } else { String::new() }
+            )
+        }
+        None => {
+            let n = racers.len();
+            format!("Finding peers… {secs} s · trying {n} torrent{}", if n == 1 { "" } else { "s" })
+        }
     }
 }
 

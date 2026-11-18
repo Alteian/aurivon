@@ -37,6 +37,10 @@ pub struct ScrapedResult {
     pub rd_cached: bool,
     /// Languages (if known)
     pub languages: Vec<String>,
+    /// Index of the video file inside the torrent (season packs, extras)
+    pub file_idx: Option<u32>,
+    /// Trackers announced for this torrent (peer discovery without waiting on DHT)
+    pub trackers: Vec<String>,
 }
 
 impl ScrapedResult {
@@ -57,6 +61,8 @@ impl ScrapedResult {
             size_str: None,
             rd_cached: false,
             languages: Vec::new(),
+            file_idx: None,
+            trackers: Vec::new(),
         })
     }
 
@@ -77,7 +83,19 @@ impl ScrapedResult {
             size_str: None,
             rd_cached: false,
             languages: Vec::new(),
+            file_idx: None,
+            trackers: Vec::new(),
         }
+    }
+
+    /// Add trackers to the result and its magnet link
+    pub fn with_trackers(mut self, trackers: Vec<String>) -> Self {
+        for t in &trackers {
+            self.magnet.push_str("&tr=");
+            self.magnet.push_str(&url_encode(t));
+        }
+        self.trackers = trackers;
+        self
     }
 
     pub fn with_seeders(mut self, seeders: u32) -> Self {
@@ -343,5 +361,31 @@ mod tests {
         assert_eq!(human_readable_size(500), "500 B");
         assert_eq!(human_readable_size(1536), "1.50 KB");
         assert_eq!(human_readable_size(1_500_000_000), "1.40 GB");
+    }
+}
+
+/// Percent-encode a value for a magnet query parameter
+fn url_encode(v: &str) -> String {
+    let mut out = String::with_capacity(v.len() * 3);
+    for b in v.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tracker_tests {
+    use super::*;
+
+    #[test]
+    fn trackers_go_into_magnet() {
+        let r = ScrapedResult::from_hash("x", "ABCDEF0123456789ABCDEF0123456789ABCDEF01", "t")
+            .with_trackers(vec!["udp://tracker.opentrackr.org:1337/announce".into()]);
+        assert!(r.magnet.starts_with("magnet:?xt=urn:btih:abcdef"));
+        assert!(r.magnet.ends_with("&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"));
+        assert_eq!(r.trackers.len(), 1);
     }
 }

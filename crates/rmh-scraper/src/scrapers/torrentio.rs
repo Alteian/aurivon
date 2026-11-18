@@ -161,7 +161,14 @@ impl Scraper for TorrentioScraper {
             let title = stream.title.as_deref().unwrap_or(&stream.name);
             let clean_title = title.lines().next().unwrap_or(title);
 
-            let mut result = ScrapedResult::from_hash(clean_title, &info_hash, "Torrentio");
+            let trackers: Vec<String> = stream
+                .sources
+                .iter()
+                .filter_map(|s| s.strip_prefix("tracker:"))
+                .map(str::to_string)
+                .collect();
+            let mut result = ScrapedResult::from_hash(clean_title, &info_hash, "Torrentio").with_trackers(trackers);
+            result.file_idx = stream.file_idx;
             
             // Parse seeders and size from the title
             if let Some(parsed) = parse_torrentio_title(title) {
@@ -215,6 +222,9 @@ struct TorrentioStream {
     url: Option<String>,
     #[serde(rename = "fileIdx")]
     file_idx: Option<u32>,
+    /// "tracker:<url>" and "dht:<hash>" entries
+    #[serde(default)]
+    sources: Vec<String>,
 }
 
 /// Parsed Torrentio title info

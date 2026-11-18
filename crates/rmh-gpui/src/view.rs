@@ -138,6 +138,8 @@ pub struct MediaHubView {
     pub(crate) searching: bool,
     pub(crate) details: Option<DetailsState>,
     pub(crate) streams: Vec<StreamHit>,
+    /// A stream that is being started: (what, live status line)
+    pub(crate) starting: Option<(String, Option<String>)>,
     pub(crate) stream_ctx: Option<StreamContext>,
     pub(crate) streams_loading: bool,
 
@@ -304,6 +306,7 @@ impl MediaHubView {
             lazy: Default::default(),
             stream_filter: config.stream_filter.clone(),
             stream_filters_open: false,
+            starting: None,
             image_cache: None,
             video: None,
             video_checked: false,
@@ -903,6 +906,14 @@ impl MediaHubView {
         if let Some(n) = &self.now {
             self.status = Some(format!("Stopped {}", n.title));
         }
+        if self.now_source.as_deref().is_some_and(|s| s.starts_with("http://127.0.0.1:")) {
+            // Stop seeding / downloading the torrent we were streaming
+            let f = self.svc.stop_torrents();
+            cx.spawn(async move |_, _| {
+                let _ = f.await;
+            })
+            .detach();
+        }
         self.finish_session(cx);
         let _ = self.player.stop();
         if let Some(v) = &self.video {
@@ -975,6 +986,14 @@ impl MediaHubView {
 
     pub(crate) fn on_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pump_images(cx);
+        if let Some((what, line)) = self.starting.as_mut() {
+            let now = self.svc.start_status();
+            if now.is_some() && now != *line {
+                self.busy = Some(format!("{what}: {}", now.as_deref().unwrap_or_default()));
+                *line = now;
+                cx.notify();
+            }
+        }
         let Some(now) = self.now.as_mut() else { return };
         let mut snap = self.player.snapshot();
         // Paused and then seeked to the very end: mpv may not report eof-reached
@@ -1284,6 +1303,7 @@ impl MediaHubView {
                     Ok(s) => {
                         this.status = Some(format!("{} streams found", s.len()));
                         this.streams = s;
+                        this.probe_debrid(cx);
                     }
                     Err(e) => this.error = Some(e),
                 }
@@ -1295,18 +1315,80 @@ impl MediaHubView {
         cx.notify();
     }
 
+    /// Ask Real-Debrid about the few streams "Play best" would try first so
+    /// the picker can show which ones start instantly, and prefetch the
+    /// metadata of the top torrents
+    fn probe_debrid(&mut self, cx: &mut Context<Self>) {
+        let order = rmh_app::streams::fast_start_order(&self.streams, &self.stream_filter);
+        let top: Vec<StreamHit> = order.iter().take(10).map(|i| self.streams[*i].clone()).collect();
+        // Fetch torrent metadata for the likely picks while the list is read
+        self.svc.prefetch(&top);
+        if !self.svc.has_real_debrid() {
+            return;
+        }
+        let fut = self.svc.probe_rd(&top);
+        cx.spawn(async move |this, cx| {
+            let Ok(map) = fut.await else { return };
+            this.update(cx, |this, cx| {
+                let mut changed = false;
+                for s in this.streams.iter_mut() {
+                    if let Some(c) = map.get(&s.info_hash) {
+                        changed |= s.rd_cached != *c;
+                        s.rd_cached = *c;
+                    }
+                }
+                if changed {
+                    rmh_app::streams::sort_best(&mut this.streams);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Default Play: the hottest streams that pass the current filters
+    pub(crate) fn play_best(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let order = rmh_app::streams::fast_start_order(&self.streams, &self.stream_filter);
+        if order.is_empty() {
+            self.error = Some("No stream matches the filters".into());
+            cx.notify();
+            return;
+        }
+        let candidates = order.into_iter().map(|i| self.streams[i].clone()).collect();
+        self.start_streams(candidates, window, cx);
+    }
+
     pub(crate) fn play_stream(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(hit) = self.streams.get(idx).cloned() else { return };
+        self.start_streams(vec![hit], window, cx);
+    }
+
+    fn start_streams(&mut self, candidates: Vec<StreamHit>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.starting.is_some() {
+            return;
+        }
         let ctx = self.stream_ctx.clone();
-        self.busy = Some(format!("Preparing stream: {}", hit.title));
+        let what = ctx.as_ref().map(|c| c.label.clone()).unwrap_or_else(|| candidates[0].title.clone());
+        self.busy = Some(format!("Starting {what}…"));
+        self.starting = Some((format!("Starting {what}"), None));
+        self.error = None;
         cx.notify();
-        let fut = self.svc.resolve_stream(&hit);
+        let started = Instant::now();
+        let fut = self.svc.fast_start(candidates);
         cx.spawn_in(window, async move |this, cx| {
             let res = fut.await;
             this.update_in(cx, |this, window, cx| {
                 this.busy = None;
+                this.starting = None;
                 match res {
                     Ok(r) => {
+                        tracing::info!(
+                            "stream ready in {:.1}s via {}: {}",
+                            started.elapsed().as_secs_f64(),
+                            if r.debrid { "Real-Debrid" } else { "torrent" },
+                            r.hit_title
+                        );
                         let title = ctx.as_ref().map(|c| c.label.clone()).unwrap_or(r.title);
                         this.play_url(r.url, title, ctx.and_then(|c| c.trakt), window, cx)
                     }

@@ -21,7 +21,7 @@ mod parser;
 mod addon;
 
 pub use error::{ScraperError, ScraperResult};
-pub use debrid::{RealDebrid, RealDebridConfig, DebridStream};
+pub use debrid::{CacheProbe, RealDebrid, RealDebridConfig, DebridStream};
 pub use scrapers::{Scraper, ScraperManager, ScrapedResult, SearchQuery, human_readable_size};
 pub use cache::ScraperCache;
 pub use parser::{TorrentInfo, parse_torrent_title};

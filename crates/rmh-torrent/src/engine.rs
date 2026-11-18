@@ -6,12 +6,73 @@ use crate::error::{TorrentError, TorrentResult};
 use crate::server::{StreamServer, StreamableFile};
 use crate::stream::{StreamInfo, StreamStatus, TorrentHandle, TorrentStream};
 use crate::find_best_video_file;
+use librqbit::api::TorrentIdOrHash;
 use librqbit::{AddTorrent, AddTorrentOptions, ManagedTorrent, Session, SessionOptions};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::SeekFrom;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{debug, info};
+
+/// Well-known public trackers, added to every torrent so peers show up in a
+/// second or two instead of waiting for the DHT to warm up.
+pub const DEFAULT_TRACKERS: &[&str] = &[
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://open.stealth.si:80/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://open.demonii.com:1337/announce",
+    "udp://exodus.desync.com:6969/announce",
+    "udp://tracker.openbittorrent.com:6969/announce",
+];
+
+/// Lowercase hex info hash of a magnet link
+fn magnet_hash(magnet: &str) -> Option<String> {
+    let lower = magnet.to_lowercase();
+    let start = lower.find("xt=urn:btih:")? + "xt=urn:btih:".len();
+    let hash: String = lower[start..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+    (hash.len() == 40).then_some(hash)
+}
+
+/// `magnet` plus [`DEFAULT_TRACKERS`] it does not list yet
+pub fn with_default_trackers(magnet: &str) -> String {
+    let mut out = magnet.to_string();
+    if !magnet.starts_with("magnet:") || std::env::var("AURIVON_BARE_MAGNET").is_ok() {
+        return out;
+    }
+    for t in DEFAULT_TRACKERS {
+        let enc: String = t
+            .bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+                _ => format!("%{b:02X}"),
+            })
+            .collect();
+        if !magnet.contains(&enc) && !magnet.contains(t) {
+            out.push_str("&tr=");
+            out.push_str(&enc);
+        }
+    }
+    out
+}
+
+/// Progress of [`TorrentEngine::prebuffer`]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BufferProgress {
+    /// Bytes of the start/end of the file already read
+    pub buffered: u64,
+    /// Bytes needed before playback starts
+    pub target: u64,
+    /// Download speed, bytes/s
+    pub download_speed: u64,
+    /// Connected peers
+    pub peers: u32,
+    /// Peers known (trackers + DHT)
+    pub seen: u32,
+}
 
 /// Configuration for the torrent engine
 #[derive(Debug, Clone)]
@@ -132,31 +193,33 @@ impl TorrentEngine {
             .ok_or(TorrentError::NotInitialized)?;
 
         info!("Adding magnet: {}...", &magnet[..magnet.len().min(60)]);
+        // librqbit ignores `AddTorrentOptions::trackers` for magnets, so the
+        // fallback trackers go into the link itself
+        let magnet = &with_default_trackers(magnet);
 
-        // Parse and add the torrent
-        let add_opts = AddTorrentOptions {
-            initial_peers: None,
-            overwrite: true,
-            ..Default::default()
+        // A torrent whose metadata was prefetched is already in the session
+        // (paused): reuse it instead of resolving the magnet again
+        let handle = match self.find_by_magnet(magnet) {
+            Some(h) => h,
+            None => {
+                let add_opts = AddTorrentOptions { initial_peers: None, overwrite: true, ..Default::default() };
+                session
+                    .add_torrent(AddTorrent::from_url(magnet), Some(add_opts))
+                    .await
+                    .map_err(|e| TorrentError::Internal(e.to_string()))?
+                    .into_handle()
+                    .ok_or_else(|| TorrentError::DownloadFailed("Failed to get handle".into()))?
+            }
         };
-
-        let response = session
-            .add_torrent(
-                AddTorrent::from_url(magnet),
-                Some(add_opts),
-            )
-            .await
-            .map_err(|e| TorrentError::Internal(e.to_string()))?;
-
-        let handle = response
-            .into_handle()
-            .ok_or_else(|| TorrentError::DownloadFailed("Failed to get handle".into()))?;
 
         // Wait for metadata
         info!("Waiting for torrent metadata...");
         handle.wait_until_initialized()
             .await
             .map_err(|e| TorrentError::DownloadFailed(e.to_string()))?;
+        if handle.is_paused() {
+            session.unpause(&handle).await.map_err(|e| TorrentError::Internal(e.to_string()))?;
+        }
 
         // Get torrent info using with_metadata
         let (torrent_name, info_hash_bytes, files) = handle
@@ -187,18 +250,28 @@ impl TorrentEngine {
             return Err(TorrentError::NoVideoFiles);
         }
 
-        // Select file to stream
-        let (selected_index, filename, size) = if let Some(idx) = file_index {
-            files.get(idx)
-                .map(|(i, n, s)| (*i, n.clone(), *s))
-                .ok_or_else(|| TorrentError::FileNotFound(format!("Index {} not found", idx)))?
-        } else {
-            find_best_video_file(&files)
+        // Select file to stream: the scraper's hint when it is a video,
+        // otherwise the largest video
+        let hinted = file_index
+            .and_then(|idx| files.get(idx))
+            .filter(|(_, n, _)| crate::is_video_file(n))
+            .map(|(i, n, s)| (*i, n.clone(), *s));
+        let (selected_index, filename, size) = match hinted {
+            Some(f) => f,
+            None => find_best_video_file(&files)
                 .map(|(i, n, s)| (i, n.to_string(), s))
-                .ok_or(TorrentError::NoVideoFiles)?
+                .ok_or(TorrentError::NoVideoFiles)?,
         };
 
         info!("Streaming file: {} ({} bytes)", filename, size);
+
+        // Only download the file we play (season packs, extras, samples)
+        if files.len() > 1 {
+            let only: HashSet<usize> = [selected_index].into_iter().collect();
+            if let Err(e) = session.update_only_files(&handle, &only).await {
+                debug!("update_only_files failed: {e:#}");
+            }
+        }
 
         // Generate stream ID
         let hash_prefix = &info_hash[..8.min(info_hash.len())];
@@ -280,6 +353,54 @@ impl TorrentEngine {
         })
     }
 
+    /// Session torrent for this magnet's info hash, if any
+    fn find_by_magnet(&self, magnet: &str) -> Option<Arc<ManagedTorrent>> {
+        let session = self.session.as_ref()?;
+        let hash = magnet_hash(magnet)?;
+        session.with_torrents(|it| it.map(|(_, h)| h.clone()).find(|h| hex::encode(h.info_hash().0) == hash))
+    }
+
+    /// Fetch a torrent's metadata in the background without downloading any
+    /// of it (the torrent stays paused), so pressing Play skips the slowest
+    /// step. Earlier prefetches that were never played are dropped.
+    pub async fn prefetch(&self, magnets: &[String]) {
+        let Some(session) = self.session.clone() else { return };
+        let wanted: HashSet<String> = magnets.iter().filter_map(|m| magnet_hash(m)).collect();
+        // Drop stale prefetches (paused and not streaming)
+        let active: HashSet<usize> = self.active_torrents.read().await.values().map(|a| a.handle.id()).collect();
+        let stale: Vec<usize> = session.with_torrents(|it| {
+            it.filter(|(id, h)| !active.contains(id) && h.is_paused() && !wanted.contains(&hex::encode(h.info_hash().0)))
+                .map(|(id, _)| id)
+                .collect()
+        });
+        for id in stale {
+            let _ = session.delete(TorrentIdOrHash::Id(id), true).await;
+        }
+        for m in magnets {
+            if self.find_by_magnet(m).is_some() {
+                continue;
+            }
+            let session = session.clone();
+            let m = with_default_trackers(m);
+            tokio::spawn(async move {
+                let opts = AddTorrentOptions { paused: true, overwrite: true, ..Default::default() };
+                match tokio::time::timeout(Duration::from_secs(120), session.add_torrent(AddTorrent::from_url(&m), Some(opts))).await {
+                    Ok(Ok(_)) => debug!("prefetched metadata for {}", &m[..m.len().min(60)]),
+                    Ok(Err(e)) => debug!("prefetch failed: {e:#}"),
+                    Err(_) => debug!("prefetch timed out"),
+                }
+            });
+        }
+    }
+
+    /// Unregister every stream (torrents stay in the session)
+    pub async fn stop_streams(&self) {
+        let ids: Vec<String> = self.active_torrents.read().await.keys().cloned().collect();
+        for id in ids {
+            self.remove_stream(&id).await;
+        }
+    }
+
     /// Get updated stream info
     pub async fn get_stream_info(&self, stream_id: &str) -> TorrentResult<StreamInfo> {
         let torrents = self.active_torrents.read().await;
@@ -333,6 +454,125 @@ impl TorrentEngine {
             seeds: peers, // librqbit doesn't distinguish seeds/peers clearly
             status,
         })
+    }
+
+    /// Read the first `head` and last `tail` bytes of the stream's file so
+    /// the player starts on data that is already on disk (mkv cues / mp4
+    /// `moov` often live at the end). Reading through librqbit's `FileStream`
+    /// gives those pieces top priority; once mpv reads the file the same
+    /// stream logic keeps a 32 MiB read-ahead window in front of its position
+    /// and re-prioritises on every seek (HTTP Range request).
+    pub async fn prebuffer(
+        &self,
+        stream_id: &str,
+        head: u64,
+        tail: u64,
+        mut on_progress: impl FnMut(BufferProgress) + Send,
+    ) -> TorrentResult<()> {
+        let (handle, file_index, size) = {
+            let torrents = self.active_torrents.read().await;
+            let a = torrents.get(stream_id).ok_or_else(|| TorrentError::TorrentNotFound(stream_id.to_string()))?;
+            (a.handle.clone(), a.file_index, a.size)
+        };
+        let head = head.min(size);
+        let tail = tail.min(size.saturating_sub(head));
+        let done = Arc::new(AtomicU64::new(0));
+
+        let read_range = |start: u64, len: u64, count: bool| {
+            let handle = handle.clone();
+            let done = done.clone();
+            async move {
+                if len == 0 {
+                    return Ok::<(), TorrentError>(());
+                }
+                let mut s = handle.stream(file_index).map_err(|e| TorrentError::Internal(e.to_string()))?;
+                s.seek(SeekFrom::Start(start)).await.map_err(|e| TorrentError::Internal(e.to_string()))?;
+                let mut buf = vec![0u8; 256 * 1024];
+                let mut got = 0u64;
+                while got < len {
+                    let want = (len - got).min(buf.len() as u64) as usize;
+                    let n = s.read(&mut buf[..want]).await.map_err(|e| TorrentError::Internal(e.to_string()))?;
+                    if n == 0 {
+                        break;
+                    }
+                    got += n as u64;
+                    if count {
+                        done.fetch_add(n as u64, Ordering::Relaxed);
+                    }
+                }
+                Ok(())
+            }
+        };
+        // The tail only needs to be prioritised, not waited for: mpv reads it
+        // a few seconds into playback, by then it is usually there
+        if tail > 0 {
+            let tail_read = read_range(size - tail, tail, false);
+            tokio::spawn(async move {
+                let _ = tail_read.await;
+            });
+        }
+        let target = head;
+        let work = read_range(0, head, true);
+        tokio::pin!(work);
+        let mut tick = tokio::time::interval(Duration::from_millis(250));
+        let mut n = 0u32;
+        loop {
+            tokio::select! {
+                r = &mut work => {
+                    on_progress(Self::progress_of(&handle, target, target));
+                    return r;
+                }
+                _ = tick.tick() => {
+                    let p = Self::progress_of(&handle, done.load(Ordering::Relaxed).min(target), target);
+                    n += 1;
+                    if n % 8 == 0 {
+                        debug!("prebuffer {stream_id}: {}/{} B, {} B/s, {} peers ({} seen)", p.buffered, p.target, p.download_speed, p.peers, p.seen);
+                    }
+                    on_progress(p);
+                }
+            }
+        }
+    }
+
+    fn progress_of(handle: &ManagedTorrent, buffered: u64, target: u64) -> BufferProgress {
+        let stats = handle.stats();
+        let (download_speed, peers, seen) = stats
+            .live
+            .as_ref()
+            .map(|l| {
+                let ps = &l.snapshot.peer_stats;
+                ((l.download_speed.mbps * 125000.0) as u64, ps.live as u32, ps.seen as u32)
+            })
+            .unwrap_or((0, 0, 0));
+        BufferProgress { buffered, target, download_speed, peers, seen }
+    }
+
+    /// Stop a stream, drop the torrent from the session and delete its data
+    pub async fn remove_stream(&self, stream_id: &str) {
+        let active = self.active_torrents.write().await.remove(stream_id);
+        self.server.unregister_stream(stream_id).await;
+        if let (Some(a), Some(session)) = (active, self.session.as_ref()) {
+            if let Err(e) = session.delete(TorrentIdOrHash::Id(a.handle.id()), true).await {
+                debug!("Could not delete torrent {stream_id}: {e:#}");
+            }
+            info!("Removed torrent stream {stream_id}");
+        }
+    }
+
+    /// Remove every stream except `keep` (only one torrent plays at a time)
+    pub async fn remove_all_except(&self, keep: Option<&str>) {
+        let ids: Vec<String> = self.active_torrents.read().await.keys().filter(|k| Some(k.as_str()) != keep).cloned().collect();
+        for id in ids {
+            self.remove_stream(&id).await;
+        }
+        // Torrents added by a start-up attempt that was cancelled before it
+        // registered a stream
+        let Some(session) = self.session.as_ref() else { return };
+        let kept: HashSet<usize> = self.active_torrents.read().await.values().map(|a| a.handle.id()).collect();
+        let orphans: Vec<usize> = session.with_torrents(|it| it.map(|(id, _)| id).filter(|id| !kept.contains(id)).collect());
+        for id in orphans {
+            let _ = session.delete(TorrentIdOrHash::Id(id), true).await;
+        }
     }
 
     /// Stop a stream and optionally remove the torrent
@@ -392,6 +632,14 @@ impl Drop for TorrentEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_trackers_are_appended_once() {
+        let m = with_default_trackers("magnet:?xt=urn:btih:abc&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce");
+        assert_eq!(m.matches("opentrackr").count(), 1);
+        assert_eq!(m.matches("&tr=").count(), DEFAULT_TRACKERS.len());
+        assert_eq!(with_default_trackers("http://x/y.mkv"), "http://x/y.mkv");
+    }
 
     #[test]
     fn test_default_config() {

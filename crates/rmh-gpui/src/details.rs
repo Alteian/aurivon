@@ -22,11 +22,30 @@ impl MediaHubView {
         let hidden = self.streams.len() - shown.len();
         let full = self.stream_filters_open;
         let saved = self.svc.config().stream_filter == *f;
+        let best = rmh_app::streams::fast_start_order(&self.streams, f).first().map(|i| &self.streams[*i]);
+        let best_label = best.map(|b| {
+            let badges = b.traits.badges();
+            let q = badges.first().map(|s| s.to_string()).unwrap_or_else(|| b.quality.clone());
+            let how = if b.rd_cached {
+                "⚡ RD".to_string()
+            } else {
+                format!("{} {}", rmh_app::streams::Health::of(b.seeders).icon(), b.seeders.unwrap_or(0))
+            };
+            format!("▶ Play best · {q} · {how}")
+        });
+        let starting = self.starting.as_ref().map(|(w, l)| (w.clone(), l.clone()));
 
         let toolbar = div()
             .flex()
             .items_center()
             .gap_2()
+            .when_some(best_label, |d, label| {
+                d.child(
+                    self.button("sf-play-best", label, true, p)
+                        .when(starting.is_some(), |b| b.opacity(0.6))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.play_best(window, cx))),
+                )
+            })
             .child(
                 self.button("sf-more", if full { "Fewer filters ▴" } else { "More filters ▾" }, false, p)
                     .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
@@ -56,6 +75,24 @@ impl MediaHubView {
             }));
 
         let mut rows = div().flex().flex_col().gap_1();
+        if let Some((what, line)) = starting {
+            rows = rows.child(
+                div()
+                    .id("stream-starting")
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_4()
+                    .py_3()
+                    .rounded_lg()
+                    .bg(rgb(p.surface_raised))
+                    .border_1()
+                    .border_color(rgb(p.warn))
+                    .child(div().size(px(8.0)).rounded_full().bg(rgb(p.warn)))
+                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(what))
+                    .child(div().text_sm().text_color(rgb(p.muted)).child(line.unwrap_or_else(|| "Picking a stream…".into()))),
+            );
+        }
         if shown.is_empty() {
             rows = rows.child(
                 div()
@@ -104,7 +141,19 @@ impl MediaHubView {
                     )
                     .child(div().w(px(230.0)).text_sm().truncate().child(quality))
                     .child(div().w(px(80.0)).text_xs().text_color(rgb(p.muted)).child(s.size.clone().unwrap_or_default()))
-                    .child(div().w(px(60.0)).text_xs().text_color(rgb(p.muted)).child(s.seeders.map(|n| format!("▲ {n}")).unwrap_or_default()))
+                    .child({
+                        let h = rmh_app::streams::Health::of(s.seeders);
+                        let color = match h {
+                            rmh_app::streams::Health::Hot => p.warn,
+                            rmh_app::streams::Health::Good => p.text,
+                            _ => p.faint,
+                        };
+                        div()
+                            .w(px(64.0))
+                            .text_xs()
+                            .text_color(rgb(color))
+                            .child(s.seeders.map(|n| format!("{} {n}", h.icon())).unwrap_or_default())
+                    })
                     .child(div().flex_1().min_w_0().text_xs().text_color(rgb(p.faint)).truncate().child(s.title.clone()))
                     .child(div().text_sm().text_color(rgb(p.accent)).child("Play ▶")),
             );

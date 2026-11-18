@@ -255,24 +255,42 @@ async fn seek_file(file: tokio::fs::File, pos: u64) -> std::io::Result<tokio::fs
 
 /// Parse HTTP Range header
 fn parse_range(range: &str, file_size: u64) -> Option<(u64, u64)> {
-    let range = range.strip_prefix("bytes=")?;
-    let parts: Vec<&str> = range.split('-').collect();
-    
-    if parts.len() != 2 {
+    let range = range.strip_prefix("bytes=")?.trim();
+    // Only the first range of a multi-range request is served
+    let range = range.split(',').next()?.trim();
+    let (a, b) = range.split_once('-')?;
+    if file_size == 0 {
         return None;
     }
-
-    let start: u64 = parts[0].parse().ok()?;
-    let end: u64 = if parts[1].is_empty() {
-        file_size - 1
+    let (start, end) = if a.is_empty() {
+        // Suffix range: the last N bytes
+        let n: u64 = b.parse().ok()?;
+        if n == 0 {
+            return None;
+        }
+        (file_size.saturating_sub(n), file_size - 1)
     } else {
-        parts[1].parse().ok()?
+        let start: u64 = a.parse().ok()?;
+        let end = if b.is_empty() { file_size - 1 } else { b.parse::<u64>().ok()?.min(file_size - 1) };
+        (start, end)
     };
+    (start <= end && end < file_size).then_some((start, end))
+}
 
-    if start <= end && end < file_size {
-        Some((start, end))
-    } else {
-        None
+#[cfg(test)]
+mod range_tests {
+    use super::parse_range;
+
+    #[test]
+    fn ranges() {
+        assert_eq!(parse_range("bytes=0-", 100), Some((0, 99)));
+        assert_eq!(parse_range("bytes=10-19", 100), Some((10, 19)));
+        assert_eq!(parse_range("bytes=90-200", 100), Some((90, 99)));
+        assert_eq!(parse_range("bytes=-10", 100), Some((90, 99)));
+        assert_eq!(parse_range("bytes=-500", 100), Some((0, 99)));
+        assert_eq!(parse_range("bytes=0-9, 20-29", 100), Some((0, 9)));
+        assert_eq!(parse_range("bytes=100-", 100), None);
+        assert_eq!(parse_range("items=0-1", 100), None);
     }
 }
 

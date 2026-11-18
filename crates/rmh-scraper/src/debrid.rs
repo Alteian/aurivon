@@ -81,63 +81,75 @@ impl RealDebrid {
         Ok(user)
     }
 
-    /// Check if torrents are cached on Real-Debrid
-    /// 
-    /// Takes a list of info hashes and returns which ones are cached
-    pub async fn check_instant_availability(&self, hashes: &[String]) -> ScraperResult<HashMap<String, CachedTorrent>> {
-        if hashes.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        // RD accepts up to 100 hashes per request
-        let chunks: Vec<&[String]> = hashes.chunks(100).collect();
-        let mut results = HashMap::new();
-
-        for chunk in chunks {
-            let hash_list = chunk.join("/");
-            let url = format!("{}/torrents/instantAvailability/{}", RD_API_BASE, hash_list);
-
-            debug!("Checking instant availability for {} hashes", chunk.len());
-
-            let resp = self.client
-                .get(&url)
-                .header("Authorization", format!("Bearer {}", self.config.api_key))
-                .send()
-                .await?;
-
-            if resp.status() == 401 {
-                return Err(ScraperError::InvalidApiKey);
+    /// Is this torrent cached on Real-Debrid?
+    ///
+    /// `instantAvailability` was switched off by Real-Debrid (it answers
+    /// `403 disabled_endpoint`), so this asks the way the web UI does: add the
+    /// magnet, select the video file and see whether the torrent jumps straight
+    /// to `downloaded`. Anything else means "not cached" and the torrent is
+    /// deleted again. A cached torrent is kept when `keep` is set so its link
+    /// can be unrestricted right away.
+    pub async fn probe_cached(&self, info_hash: &str, file_idx: Option<u32>, keep: bool) -> ScraperResult<CacheProbe> {
+        let magnet = format!("magnet:?xt=urn:btih:{}", info_hash);
+        let id = match self.add_magnet(&magnet).await {
+            Ok(id) => id,
+            Err(ScraperError::RealDebrid(e)) if e.contains("infringing") || e.contains("451") => {
+                debug!("RD refuses {info_hash}: {e}");
+                return Ok(CacheProbe { blocked: true, ..Default::default() });
             }
-
-            // Response is a map of hash -> availability info
-            // Real-Debrid uses lowercase hashes
-            // The response can be complex - some hashes might have empty arrays or different formats
-            let text = resp.text().await
-                .map_err(|e| ScraperError::Parse(format!("Failed to read instant availability response: {}", e)))?;
-            
-            // Try to parse as flexible JSON
-            let data: HashMap<String, serde_json::Value> = serde_json::from_str(&text)
-                .map_err(|e| ScraperError::Parse(format!("Failed to parse instant availability JSON: {}", e)))?;
-
-            for (hash, value) in data {
-                // Check if this hash has cached data
-                if let Some(obj) = value.as_object() {
-                    if let Some(rd_value) = obj.get("rd") {
-                        if let Some(rd_array) = rd_value.as_array() {
-                            if !rd_array.is_empty() {
-                                // There's at least one cached variant
-                                debug!("Hash {} is cached in RD", hash);
-                                // Mark as cached - we'll figure out files later
-                                results.insert(hash.to_lowercase(), CachedTorrent { files: vec![] });
-                            }
-                        }
-                    }
+            Err(e) => return Err(e),
+        };
+        let mut probe = CacheProbe::default();
+        let mut selected = false;
+        for _ in 0..8 {
+            let info = match self.get_torrent_info(&id).await {
+                Ok(i) => i,
+                Err(e) => {
+                    let _ = self.delete_torrent(&id).await;
+                    return Err(e);
                 }
+            };
+            match info.status.as_str() {
+                "waiting_files_selection" if !selected => {
+                    let ids: Vec<u32> = pick_video_file(&info.files, file_idx).into_iter().collect();
+                    self.select_files(&id, &ids).await?;
+                    selected = true;
+                    continue;
+                }
+                "downloaded" => {
+                    probe.cached = !info.links.is_empty();
+                    probe.links = info.links;
+                    break;
+                }
+                // RD is still fetching the metadata: give it a moment
+                "magnet_conversion" | "queued" if !selected => {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                }
+                _ => break,
             }
         }
+        if probe.cached && keep {
+            probe.torrent_id = Some(id);
+        } else if let Err(e) = self.delete_torrent(&id).await {
+            debug!("Could not delete RD probe torrent {id}: {e}");
+        }
+        debug!("RD probe {info_hash}: cached={}", probe.cached);
+        Ok(probe)
+    }
 
-        info!("Found {} cached torrents out of {}", results.len(), hashes.len());
-        Ok(results)
+    /// Remove a torrent from the Real-Debrid account
+    pub async fn delete_torrent(&self, torrent_id: &str) -> ScraperResult<()> {
+        let url = format!("{}/torrents/delete/{}", RD_API_BASE, torrent_id);
+        let resp = self.client
+            .delete(&url)
+            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .send()
+            .await?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(ScraperError::RealDebrid(format!("delete failed: {}", resp.status())))
+        }
     }
 
     /// Add a magnet link to Real-Debrid
@@ -156,6 +168,16 @@ impl RealDebrid {
 
         if resp.status() == 401 {
             return Err(ScraperError::InvalidApiKey);
+        }
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            let code = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+                .unwrap_or_default();
+            return Err(ScraperError::RealDebrid(format!("addMagnet {} {}", status.as_u16(), code)));
         }
 
         let data: AddMagnetResponse = resp.json().await
@@ -247,77 +269,44 @@ impl RealDebrid {
         })
     }
 
-    /// Get a direct streaming link for a cached torrent
-    /// 
-    /// This is the main method for getting playable URLs
-    pub async fn get_stream_link(
-        &self,
-        info_hash: &str,
-        cached_info: Option<&CachedTorrent>,
-    ) -> ScraperResult<DebridStream> {
-        // First check if it's already in our downloads
-        if let Some(link) = self.find_existing_download(info_hash).await? {
-            return self.unrestrict_link(&link).await;
+    /// Direct streaming link for a torrent cached on Real-Debrid
+    ///
+    /// Fails with "not cached" when RD would have to download it first.
+    pub async fn get_stream_link(&self, info_hash: &str, file_idx: Option<u32>) -> ScraperResult<DebridStream> {
+        let probe = self.probe_cached(info_hash, file_idx, true).await?;
+        if !probe.cached {
+            return Err(ScraperError::RealDebrid("not cached on Real-Debrid".into()));
         }
-
-        // Add the magnet and get link
-        let magnet = format!("magnet:?xt=urn:btih:{}", info_hash);
-        let torrent_id = self.add_magnet(&magnet).await?;
-
-        // Select the video file(s)
-        let file_ids = if let Some(cached) = cached_info {
-            cached.files.iter()
-                .filter(|f| is_video_file(&f.filename))
-                .map(|f| f.id)
-                .collect::<Vec<_>>()
-        } else {
-            vec![] // Select all
-        };
-
-        self.select_files(&torrent_id, &file_ids).await?;
-
-        // Wait for links to be ready (should be instant for cached content)
-        let info = self.get_torrent_info(&torrent_id).await?;
-
-        if info.links.is_empty() {
-            return Err(ScraperError::RealDebrid("No links available".into()));
+        match probe.links.first() {
+            Some(link) => self.unrestrict_link(link).await,
+            None => Err(ScraperError::RealDebrid("No links available".into())),
         }
-
-        // Unrestrict the first video link
-        let link = &info.links[0];
-        self.unrestrict_link(link).await
     }
+}
 
-    /// Find if we already have this torrent in our RD downloads
-    async fn find_existing_download(&self, info_hash: &str) -> ScraperResult<Option<String>> {
-        let url = format!("{}/torrents", RD_API_BASE);
-        
-        let resp = self.client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
-            .send()
-            .await?;
+/// Outcome of [`RealDebrid::probe_cached`]
+#[derive(Debug, Clone, Default)]
+pub struct CacheProbe {
+    /// RD has the file and serves it instantly
+    pub cached: bool,
+    /// RD refused the torrent (e.g. `infringing_file`)
+    pub blocked: bool,
+    /// Kept RD torrent id (only when cached and asked to keep)
+    pub torrent_id: Option<String>,
+    /// Hoster links, unrestrict one to stream
+    pub links: Vec<String>,
+}
 
-        if resp.status() == 401 {
-            return Err(ScraperError::InvalidApiKey);
+/// RD file id of the video to select: Torrentio's `fileIdx` (0-based) when it
+/// points at a video, otherwise the largest video file
+fn pick_video_file(files: &[TorrentFile], file_idx: Option<u32>) -> Option<u32> {
+    let videos: Vec<&TorrentFile> = files.iter().filter(|f| is_video_file(&f.path)).collect();
+    if let Some(idx) = file_idx {
+        if let Some(f) = videos.iter().find(|f| f.id == idx + 1) {
+            return Some(f.id);
         }
-
-        let torrents: Vec<TorrentListItem> = resp.json().await
-            .map_err(|e| ScraperError::Parse(e.to_string()))?;
-
-        let hash_lower = info_hash.to_lowercase();
-        for torrent in torrents {
-            if torrent.hash.to_lowercase() == hash_lower {
-                if let Some(links) = torrent.links {
-                    if !links.is_empty() {
-                        return Ok(Some(links[0].clone()));
-                    }
-                }
-            }
-        }
-
-        Ok(None)
     }
+    videos.iter().max_by_key(|f| f.bytes).map(|f| f.id)
 }
 
 // Helper to check if filename is a video
@@ -327,36 +316,6 @@ fn is_video_file(filename: &str) -> bool {
     ];
     let lower = filename.to_lowercase();
     video_extensions.iter().any(|ext| lower.ends_with(ext))
-}
-
-// Find the best cached variant (one with largest video file)
-fn find_best_variant(variants: &[HashMap<String, CachedFile>]) -> Option<CachedTorrent> {
-    let mut best_size = 0u64;
-    let mut best_files = Vec::new();
-
-    for variant in variants {
-        let video_files: Vec<CachedFileInfo> = variant.iter()
-            .filter(|(_, f)| is_video_file(&f.filename))
-            .map(|(id, f)| CachedFileInfo {
-                id: id.parse().unwrap_or(0),
-                filename: f.filename.clone(),
-                filesize: f.filesize,
-            })
-            .collect();
-
-        let total_size: u64 = video_files.iter().map(|f| f.filesize).sum();
-        
-        if total_size > best_size {
-            best_size = total_size;
-            best_files = video_files;
-        }
-    }
-
-    if best_files.is_empty() {
-        None
-    } else {
-        Some(CachedTorrent { files: best_files })
-    }
 }
 
 // API Response types
@@ -369,29 +328,6 @@ pub struct UserInfo {
     pub premium: u64,
     #[serde(default)]
     pub expiration: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct InstantAvailability {
-    rd: Option<Vec<HashMap<String, CachedFile>>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CachedFile {
-    filename: String,
-    filesize: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct CachedTorrent {
-    pub files: Vec<CachedFileInfo>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CachedFileInfo {
-    pub id: u32,
-    pub filename: String,
-    pub filesize: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -421,14 +357,6 @@ pub struct TorrentFile {
 }
 
 #[derive(Debug, Deserialize)]
-struct TorrentListItem {
-    id: String,
-    hash: String,
-    status: String,
-    links: Option<Vec<String>>,
-}
-
-#[derive(Debug, Deserialize)]
 struct UnrestrictResponse {
     download: String,
     filename: String,
@@ -448,5 +376,23 @@ mod tests {
         
         let result = rd.verify_api_key().await;
         assert!(result.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod pick_tests {
+    use super::*;
+
+    fn f(id: u32, path: &str, bytes: u64) -> TorrentFile {
+        TorrentFile { id, path: path.into(), bytes, selected: 0 }
+    }
+
+    #[test]
+    fn picks_hinted_or_largest_video() {
+        let files = vec![f(1, "/a/sample.mkv", 10), f(2, "/a/E01.mkv", 500), f(3, "/a/E02.mkv", 400), f(4, "/a/info.nfo", 1)];
+        assert_eq!(pick_video_file(&files, Some(2)), Some(3));
+        assert_eq!(pick_video_file(&files, None), Some(2));
+        assert_eq!(pick_video_file(&files, Some(3)), Some(2)); // .nfo is not a video
+        assert_eq!(pick_video_file(&[f(1, "x.txt", 1)], None), None);
     }
 }

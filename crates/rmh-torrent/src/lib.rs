@@ -20,7 +20,7 @@ mod stream;
 mod error;
 mod addon;
 
-pub use engine::{TorrentEngine, TorrentEngineConfig};
+pub use engine::{BufferProgress, TorrentEngine, TorrentEngineConfig, DEFAULT_TRACKERS};
 pub use server::StreamServer;
 pub use stream::{TorrentStream, StreamInfo, StreamStatus};
 pub use error::{TorrentError, TorrentResult};
