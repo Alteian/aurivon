@@ -5,6 +5,8 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-18
+
 ### Added
 - "▶ Play best" in the stream picker: plays the stream most likely to start fast among those that pass your filters: a Real-Debrid cached link if there is one, otherwise the healthiest torrent (more seeders first, quality breaks ties, 30 GB+ files count as slower)
 - Torrent health in the picker: 🔥 100+ seeders, ▲ 25+, ▽ 5+, ✕ fewer; new "Starts fastest" sort
