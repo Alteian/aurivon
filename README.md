@@ -179,18 +179,22 @@ cargo build --release
 
 ## Configuration
 
-### TMDB API Key (Optional)
+### TMDB API key (recommended)
 
-To enable metadata fetching, get a free API key from [TMDB](https://www.themoviedb.org/settings/api):
+Aurivon does **not** ship a shared TMDB key (each account has its own rate limit).
+Posters, browse, trending and details need a free personal key:
+
+1. Create an account at [themoviedb.org](https://www.themoviedb.org/signup).
+2. Open [Settings → API](https://www.themoviedb.org/settings/api).
+3. Request an API key as a **Developer** (fill in the short form; “application URL” can be `https://localhost`).
+4. Copy the **API Key (v3 auth)** string.
+5. In Aurivon: **Settings → Integrations**, paste it into **TMDB API key**, then **Save settings**.
+
+For development you can also put it in `.env` / the environment:
 
 ```bash
-# Create a .env file in the project root
 echo "TMDB_API_KEY=your_api_key_here" > .env
-```
-
-Or set the environment variable:
-
-```bash
+# or
 export TMDB_API_KEY=your_api_key_here
 ```
 
@@ -319,20 +323,17 @@ tags, pushes and creates the GitHub release. CI then attaches
 
 ### Trakt
 
-Uses **OAuth Authorization Code + PKCE** (S256). No `client_secret` — do not ship one
-in the app or `.env`.
+Uses **OAuth Authorization Code + PKCE** (S256). Aurivon ships a **built-in public
+client id** (no `client_secret`). Open the **Addons** sidebar page and click
+**Connect** — a browser opens for approval. The GitHub Pages callback
+(`https://alteian.github.io/aurivon/oauth/trakt.html`) forwards the code to
+`http://127.0.0.1:18787`. Tokens live in `~/.config/aurivon/trakt.json` (mode 0600).
 
-1. Create an API app at <https://trakt.tv/oauth/applications> with redirect URI
-   `https://alteian.github.io/aurivon/oauth/trakt.html` (HTTPS only; same value as
-   `rmh_trakt::REDIRECT_URI`).
-2. Paste the **client id** in Settings → Services → Trakt (or set `TRAKT_CLIENT_ID`)
-   and click **Save & connect**. A browser opens for Trakt approval.
-3. The GitHub Pages callback forwards the code to `http://127.0.0.1:18787` inside
-   Aurivon. The token is stored in `~/.config/aurivon/trakt.json` (mode 0600).
+Optional: set your own API app’s client id on Addons (override field) or
+`TRAKT_CLIENT_ID` (same redirect URI required).
 
-Then playback is scrobbled (start/pause/stop), **Sync now** syncs watched history both
-ways, and Trakt watchlist / progress rows appear on Home. Re-authenticate once after
-upgrading from device-code / client-secret login.
+Then playback is scrobbled (start/pause/stop), watched/watchlist sync runs in the
+background, and Trakt catalog rows appear on Home.
 
 ### More services (Settings → More services)
 
@@ -410,6 +411,16 @@ cargo build
 ```
 
 ## Troubleshooting
+
+### Database error after updating
+
+If you see `migration … was previously applied but has been modified`, quit Aurivon and run:
+
+```bash
+aurivon --repair-db
+```
+
+Or open **Settings → Storage → Repair library database**. Startup also auto-fixes checksum drift from older releases. If the file is still unusable, Repair backs it up and creates a fresh DB (re-add libraries and rescan; media files are untouched).
 
 ### MPV Not Found
 

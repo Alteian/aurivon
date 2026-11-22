@@ -1,4 +1,5 @@
-//! Settings: libraries, home layout, player, services (TMDB, Trakt, Real-Debrid).
+//! Settings: libraries, home layout, player, services (TMDB, Real-Debrid).
+//! Trakt account setup lives on the Addons page.
 
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::prelude::FluentBuilder;
@@ -6,7 +7,7 @@ use gpui_kit::*;
 use rmh_app::VideoMode;
 
 use crate::theme::Palette;
-use crate::view::MediaHubView;
+use crate::view::{MediaHubView, SettingsTab};
 
 fn status_line(p: Palette, ok: bool, text: String) -> impl IntoElement {
     div()
@@ -154,39 +155,31 @@ impl MediaHubView {
             )
             .child(self.field("mpv executable", "Leave as mpv to use the one on PATH.", &self.mpv_input, p));
 
-        // Services
-        let trakt_state = match (self.trakt.configured, self.trakt.logged_in) {
-            (false, _) => "Not set up: create an API app at trakt.tv/oauth/applications with redirect URI https://alteian.github.io/aurivon/oauth/trakt.html and paste its client id (no secret).".to_string(),
-            (true, false) if self.trakt_waiting => "Browser opened. Approve Aurivon, then return here.".to_string(),
-            (true, false) => "Client id saved. Click Connect — a browser window opens for Trakt PKCE login.".to_string(),
-            (true, true) => {
-                let mut s = format!(
-                    "Connected{}. Playback is scrobbled; watched and watchlist sync on start and every ~45 min.",
-                    self.trakt.username.clone().map(|u| format!(" as {u}")).unwrap_or_default()
-                );
-                if let Some(ts) = cfg.trakt_watched_synced_at {
-                    if let Some(dt) = chrono::DateTime::from_timestamp(ts, 0) {
-                        s.push_str(&format!(" Last watched sync {}.", dt.format("%Y-%m-%d %H:%M UTC")));
-                    }
-                }
-                s
-            }
-        };
-        let mut trakt_actions = div().flex().flex_wrap().gap_2();
-        if self.trakt.logged_in {
-            trakt_actions = trakt_actions
-                .child(self.button("trakt-sync", "Sync now", true, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.trakt_sync(cx))))
-                .child(self.button("trakt-out", "Disconnect", false, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.trakt_disconnect(cx))));
-        } else {
-            trakt_actions = trakt_actions.child(
-                self.button("trakt-in", if self.trakt_waiting { "Waiting for browser…" } else { "Save & connect" }, true, p)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.trakt_connect(cx))),
-            );
-        }
+        // Services (Trakt setup is on the Addons page)
         let services = self
             .card(p)
             .child(self.section_title("Services", p))
-            .child(self.field("TMDB API key", "Posters, details, seasons/episodes, trending. Free at themoviedb.org/settings/api.", &self.tmdb_input, p))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_4()
+                    .rounded_xl()
+                    .bg(rgb(p.surface_raised))
+                    .border_1()
+                    .border_color(rgb(p.border_soft))
+                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Get a free TMDB API key"))
+                    .child(div().text_xs().text_color(rgb(p.muted)).child(
+                        "1. Create an account at themoviedb.org  ·  2. Settings → API → Request an API Key (Developer)  ·  3. Paste the v3 key below",
+                    ))
+                    .child(
+                        self.button("tmdb-guide", "Open themoviedb.org/settings/api", false, p).on_click(cx.listener(
+                            |_, _: &ClickEvent, _w, cx| cx.open_url("https://www.themoviedb.org/settings/api"),
+                        )),
+                    ),
+            )
+            .child(self.field("TMDB API key", "Required for posters, details, browse and trending", &self.tmdb_input, p))
             .child(
                 div().flex().gap_2().child(
                     self.button("match-all", if self.matching { "Matching…" } else { "Re-match library with TMDB" }, false, p)
@@ -200,23 +193,6 @@ impl MediaHubView {
                     .gap_4()
                     .child(div().flex_1().child(self.field("TorBox API key", "Optional second debrid", &self.disc.inputs.torbox, p)))
                     .child(div().flex_1().child(self.field("AllDebrid API key", "Optional third debrid", &self.disc.inputs.alldebrid, p))),
-            )
-            .child(div().h(px(4.0)))
-            .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("Trakt"))
-            .child(div().text_xs().text_color(rgb(p.muted)).child(trakt_state))
-            .child(self.field("Client id", "Public client id from your Trakt API app (no secret)", &self.trakt_id_input, p))
-            .child(trakt_actions)
-            .when(self.trakt.logged_in, |d| {
-                d.child(
-                    div().flex().gap_2().child(
-                        self.button("trakt-wl-sync", "Sync watchlist", false, p)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.sync_watchlist_only(cx))),
-                    ),
-                )
-            })
-            .child(
-                self.toggle_row("tg-scrobble", "Scrobble to Trakt", "Send start/pause/stop while watching", cfg.trakt_scrobble, p)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.update_config(|c| c.trakt_scrobble = !c.trakt_scrobble, false, cx))),
             )
             .child(
                 div().flex().child(
@@ -245,27 +221,151 @@ impl MediaHubView {
                 if self.svc.has_real_debrid() { "Real-Debrid: configured" } else { "Real-Debrid: not configured (P2P only)" }.into(),
             ))
             .child(div().text_xs().text_color(rgb(p.faint)).child(
-                "Keys: Ctrl+K or / search · Space/K play · ←/→ 10 s (Shift 60 s) · ↑/↓ volume · ,/. frame · [/] speed · PgUp/PgDn next/prev chapter · I skip intro · A audio · J subtitles · O OpenSubtitles · T panel tab · N next episode · F fullscreen (player) · F11 fullscreen (anywhere) · M mute · S stop · Enter resume · Ctrl+1–8 Home/Movies/Series/Calendar/Watchlist/Library/Playing/Settings · ←/→ hero (Home) · Ctrl+L home layout · Ctrl+I details",
+                "Keys: Ctrl+K or / search · Space/K play · ←/→ 10 s (Shift 60 s) · ↑/↓ volume · ,/. frame · [/] speed · PgUp/PgDn next/prev chapter · I skip intro · A audio · J subtitles · O OpenSubtitles · T panel tab · N next episode · F fullscreen (player) · F11 fullscreen (anywhere) · M mute · S stop · Enter resume · Ctrl+1–9 Home/Movies/Series/Calendar/Watchlist/Library/Playing/Addons/Settings · ←/→ hero (Home) · Ctrl+L home layout · Ctrl+I details",
             ));
+
+        let mut cats = div().flex().flex_wrap().gap_3();
+        for tab in SettingsTab::ALL {
+            let on = self.settings_tab == tab;
+            cats = cats.child(
+                div()
+                    .id(SharedString::from(format!("set-tab-{}", tab.label())))
+                    .w(px(160.0))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_4()
+                    .rounded_2xl()
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(rgb(if on { p.accent } else { p.border_soft }))
+                    .bg(rgb(if on { p.accent_soft } else { p.surface }))
+                    .hover(|s| s.border_color(rgb(p.accent)))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        this.settings_tab = tab;
+                        if tab == SettingsTab::Storage {
+                            this.refresh_cache_usage();
+                        }
+                        cx.notify();
+                    }))
+                    .child(div().text_lg().child(tab.glyph()))
+                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(tab.label()))
+                    .child(div().text_xs().text_color(rgb(p.muted)).child(tab.hint())),
+            );
+        }
+
+        let panel = match self.settings_tab {
+            SettingsTab::Appearance => div()
+                .flex()
+                .flex_col()
+                .gap_6()
+                .child(self.appearance_card(p, cx))
+                .child(self.home_rows_card(p, cx))
+                .into_any_element(),
+            SettingsTab::Libraries => self
+                .card(p)
+                .child(self.section_title("Libraries", p))
+                .child(libs)
+                .child(self.add_library_row(p, cx))
+                .into_any_element(),
+            SettingsTab::Player => div()
+                .flex()
+                .flex_col()
+                .gap_6()
+                .child(player)
+                .child(self.playback_extras_card(p, cx))
+                .into_any_element(),
+            SettingsTab::Integrations => div()
+                .flex()
+                .flex_col()
+                .gap_6()
+                .child(services)
+                .child(self.more_services(p, cx))
+                .into_any_element(),
+            SettingsTab::Streams => self.stream_filter_card(p, cx).into_any_element(),
+            SettingsTab::Storage => self.cache_card(p, cx).into_any_element(),
+            SettingsTab::Updates => self.updates_card(p, cx).into_any_element(),
+            SettingsTab::About => status.into_any_element(),
+        };
 
         div()
             .flex()
             .flex_col()
             .gap_6()
-            .max_w(px(900.0))
-            .child(self.appearance_card(p, cx))
-            .child(self.card(p).child(self.section_title("Libraries", p)).child(libs).child(self.add_library_row(p, cx)))
-            .child(player)
-            .child(services)
-            .child(self.more_services(p, cx))
-            .child(self.stream_filter_card(p, cx))
-            .child(self.cache_card(p, cx))
-            .child(self.home_rows_card(p, cx))
-            .child(self.addons_card(p, cx))
-            .child(self.playback_extras_card(p, cx))
-            .child(self.updates_card(p, cx))
-            .child(status)
+            .max_w(px(960.0))
+            .child(cats)
+            .child(panel)
             .into_any_element()
+    }
+
+    pub(crate) fn addons_page(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_6()
+            .max_w(px(900.0))
+            .child(self.trakt_card(p, cx))
+            .child(self.addons_card(p, cx))
+            .into_any_element()
+    }
+
+    fn trakt_card(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let cfg = self.svc.config();
+        let trakt_state = match (self.trakt.configured, self.trakt.logged_in) {
+            (false, _) => "Trakt client unavailable.".to_string(),
+            (true, false) if self.trakt_waiting => "Browser opened. Approve Aurivon, then return here.".to_string(),
+            (true, false) => "Click Connect — a browser window opens for Trakt PKCE login (built-in client id).".to_string(),
+            (true, true) => {
+                let mut s = format!(
+                    "Connected{}. Playback is scrobbled; watched and watchlist sync on start and every ~45 min.",
+                    self.trakt.username.clone().map(|u| format!(" as {u}")).unwrap_or_default()
+                );
+                if let Some(ts) = cfg.trakt_watched_synced_at {
+                    if let Some(dt) = chrono::DateTime::from_timestamp(ts, 0) {
+                        s.push_str(&format!(" Last watched sync {}.", dt.format("%Y-%m-%d %H:%M UTC")));
+                    }
+                }
+                s
+            }
+        };
+        let mut trakt_actions = div().flex().flex_wrap().gap_2();
+        if self.trakt.logged_in {
+            trakt_actions = trakt_actions
+                .child(self.button("trakt-sync", "Sync now", true, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.trakt_sync(cx))))
+                .child(self.button("trakt-out", "Disconnect", false, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.trakt_disconnect(cx))));
+        } else {
+            trakt_actions = trakt_actions.child(
+                self.button("trakt-in", if self.trakt_waiting { "Waiting for browser…" } else { "Connect" }, true, p)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.trakt_connect(cx))),
+            );
+        }
+        self.card(p)
+            .child(self.section_title("Trakt", p))
+            .child(div().text_sm().text_color(rgb(p.muted)).child(
+                "Official account link for watchlist, history, scrobble and Home catalog rows.",
+            ))
+            .child(div().text_xs().text_color(rgb(p.muted)).child(trakt_state))
+            .child(self.field(
+                "Client id override",
+                "Optional — leave blank to use Aurivon’s built-in public client id",
+                &self.trakt_id_input,
+                p,
+            ))
+            .child(trakt_actions)
+            .when(self.trakt.logged_in, |d| {
+                d.child(
+                    div().flex().gap_2().child(
+                        self.button("trakt-wl-sync", "Sync watchlist", false, p)
+                            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.sync_watchlist_only(cx))),
+                    ),
+                )
+            })
+            .child(
+                self.toggle_row("tg-scrobble", "Scrobble to Trakt", "Send start/pause/stop while watching", cfg.trakt_scrobble, p)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                        this.update_config(|c| c.trakt_scrobble = !c.trakt_scrobble, false, cx)
+                    })),
+            )
     }
 
     fn home_rows_card(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {

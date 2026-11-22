@@ -7622,6 +7622,7 @@ dependencies = [
  "dirs 5.0.1",
  "rmh-core",
  "sqlx",
+ "tempfile",
  "thiserror 2.0.17",
  "tokio",
  "tracing",

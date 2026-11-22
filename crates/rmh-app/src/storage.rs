@@ -4,10 +4,36 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 
+use rmh_database::{Database, RepairReport};
 use tracing::info;
 
 use crate::images::{prune, usage, CacheUsage};
 use crate::service::{MediaService, ServiceResult};
+
+/// One-shot repair for `aurivon --repair-db` (no UI / MediaService required).
+pub fn repair_default_database() -> Result<String, String> {
+    let path = Database::default_path().map_err(|e| format!("{e:#}"))?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("runtime: {e}"))?;
+    let report = rt
+        .block_on(Database::repair_at(&path))
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(match report {
+        RepairReport::Ok => format!("Library database is fine ({})", path.display()),
+        RepairReport::ChecksumsUpdated { versions } => {
+            format!(
+                "Repaired migration checksums for versions {versions:?} ({})",
+                path.display()
+            )
+        }
+        RepairReport::Recreated { backup } => format!(
+            "Database recreated (was unusable). Backup: {}. Re-add libraries and rescan.",
+            backup.display()
+        ),
+    })
+}
 
 /// One on-disk cache bucket
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,5 +264,32 @@ impl MediaService {
             return false;
         }
         dir_usage(&self.torrent_dir()).bytes >= cap.saturating_mul(9) / 10
+    }
+
+    /// Fix migration checksum drift from older releases; if the file is still
+    /// unusable, move it aside and create a fresh library database.
+    pub fn repair_database(&self) -> impl Future<Output = ServiceResult<String>> + 'static {
+        let path = self.inner.db_path.clone();
+        let existing = self.inner.db.get().cloned();
+        self.run(async move {
+            if let Some(db) = existing {
+                let versions = db.repair_checksums().await.map_err(|e| format!("{e:#}"))?;
+                return Ok(if versions.is_empty() {
+                    "Library database is fine.".into()
+                } else {
+                    format!("Repaired migration checksums for versions {versions:?}.")
+                });
+            }
+            match Database::repair_at(&path).await.map_err(|e| format!("{e:#}"))? {
+                RepairReport::Ok => Ok("Library database is fine.".into()),
+                RepairReport::ChecksumsUpdated { versions } => {
+                    Ok(format!("Repaired migration checksums for versions {versions:?}."))
+                }
+                RepairReport::Recreated { backup } => Ok(format!(
+                    "Database recreated (was unusable). Backup: {}. Re-add libraries and rescan.",
+                    backup.display()
+                )),
+            }
+        })
     }
 }

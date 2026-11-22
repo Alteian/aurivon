@@ -28,7 +28,74 @@ pub enum Page {
     Player,
     Details,
     Person,
+    Addons,
     Settings,
+}
+
+/// Which Settings category panel is open (category cards at the top).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsTab {
+    #[default]
+    Appearance,
+    Libraries,
+    Player,
+    Integrations,
+    Streams,
+    Storage,
+    Updates,
+    About,
+}
+
+impl SettingsTab {
+    pub const ALL: [SettingsTab; 8] = [
+        SettingsTab::Appearance,
+        SettingsTab::Libraries,
+        SettingsTab::Player,
+        SettingsTab::Integrations,
+        SettingsTab::Streams,
+        SettingsTab::Storage,
+        SettingsTab::Updates,
+        SettingsTab::About,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsTab::Appearance => "Appearance",
+            SettingsTab::Libraries => "Libraries",
+            SettingsTab::Player => "Player",
+            SettingsTab::Integrations => "Integrations",
+            SettingsTab::Streams => "Streams",
+            SettingsTab::Storage => "Storage",
+            SettingsTab::Updates => "Updates",
+            SettingsTab::About => "About",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            SettingsTab::Appearance => "Theme, layout, cards, navigation",
+            SettingsTab::Libraries => "Local folders to scan",
+            SettingsTab::Player => "mpv, autoplay, skip intro",
+            SettingsTab::Integrations => "TMDB, debrid, Simkl…",
+            SettingsTab::Streams => "Quality filters and sort",
+            SettingsTab::Storage => "Caches and disk caps",
+            SettingsTab::Updates => "Auto-update preferences",
+            SettingsTab::About => "Status and keyboard shortcuts",
+        }
+    }
+
+    pub fn glyph(self) -> &'static str {
+        match self {
+            SettingsTab::Appearance => "◐",
+            SettingsTab::Libraries => "▤",
+            SettingsTab::Player => "▶",
+            SettingsTab::Integrations => "⛓",
+            SettingsTab::Streams => "⚡",
+            SettingsTab::Storage => "💾",
+            SettingsTab::Updates => "↻",
+            SettingsTab::About => "ℹ",
+        }
+    }
 }
 
 /// Sidebar entries: pages plus Search and Movies / Series (Browse pre-set)
@@ -42,7 +109,7 @@ pub enum Nav {
 
 impl Nav {
     /// Streaming first, the local library last (Ctrl+1… follows this order, Search excluded)
-    pub const ALL: [Nav; 9] = [
+    pub const ALL: [Nav; 10] = [
         Nav::Page(Page::Home),
         Nav::Search,
         Nav::Movies,
@@ -51,6 +118,7 @@ impl Nav {
         Nav::Page(Page::Watchlist),
         Nav::Page(Page::Library),
         Nav::Page(Page::Player),
+        Nav::Page(Page::Addons),
         Nav::Page(Page::Settings),
     ];
 
@@ -84,6 +152,7 @@ impl Page {
             Page::Player => "Now Playing",
             Page::Details => "Details",
             Page::Person => "Person",
+            Page::Addons => "Addons",
             Page::Settings => "Settings",
         }
     }
@@ -98,6 +167,7 @@ impl Page {
             Page::Player => "▶",
             Page::Details => "ℹ",
             Page::Person => "☺",
+            Page::Addons => "⧉",
             Page::Settings => "⚙",
         }
     }
@@ -112,7 +182,8 @@ impl Page {
             Page::Player => "",
             Page::Details => "",
             Page::Person => "",
-            Page::Settings => "Libraries, player and connected services",
+            Page::Addons => "Trakt account, official catalogs and HTTP addons",
+            Page::Settings => "Appearance, libraries, player and integrations",
         }
     }
 }
@@ -158,6 +229,7 @@ pub struct MediaHubView {
     pub(crate) player: Player,
     pub(crate) page: Page,
     pub(crate) back_page: Page,
+    pub(crate) settings_tab: SettingsTab,
     pub(crate) libraries: Vec<Library>,
     pub(crate) entries: Vec<LibraryEntry>,
     pub(crate) busy: Option<String>,
@@ -324,6 +396,7 @@ impl MediaHubView {
             player,
             page: Page::Home,
             back_page: Page::Home,
+            settings_tab: SettingsTab::default(),
             libraries: Vec::new(),
             entries: Vec::new(),
             busy: Some("Loading library…".into()),
@@ -2011,7 +2084,8 @@ impl MediaHubView {
                 "5" => Some(Nav::Page(Page::Watchlist)),
                 "6" => Some(Nav::Page(Page::Library)),
                 "7" => Some(Nav::Page(Page::Player)),
-                "8" | "," => Some(Nav::Page(Page::Settings)),
+                "8" => Some(Nav::Page(Page::Addons)),
+                "9" | "," => Some(Nav::Page(Page::Settings)),
                 _ => None,
             };
             if let Some(item) = item {

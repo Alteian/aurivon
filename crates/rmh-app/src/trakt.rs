@@ -41,7 +41,7 @@ impl MediaService {
             .read()
             .ok()
             .and_then(|t| t.clone())
-            .ok_or_else(|| "Trakt is not set up: add your Trakt client id in Settings.".to_string())
+            .ok_or_else(|| "Trakt client failed to start.".to_string())
     }
 
     pub fn trakt_status(&self) -> impl Future<Output = ServiceResult<TraktStatus>> + 'static {

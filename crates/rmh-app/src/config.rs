@@ -476,9 +476,13 @@ impl AppConfig {
         self.home_rows.iter().any(|r| r == key)
     }
 
-    /// Trakt client id when set (public client; PKCE login needs no secret)
+    /// Trakt client id: Settings / `TRAKT_CLIENT_ID` override, else the baked-in public app id.
     pub fn trakt_id(&self) -> Option<String> {
-        self.trakt_client_id.clone().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+        self.trakt_client_id
+            .as_ref()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .or_else(|| Some(rmh_trakt::DEFAULT_CLIENT_ID.to_string()))
     }
 
     pub fn save(&self) -> Result<()> {

@@ -31,6 +31,8 @@ const API: &str = "https://api.trakt.tv";
 const AUTH: &str = "https://auth.trakt.tv";
 /// Must match the redirect URI registered on the Trakt API app (HTTPS only).
 pub const REDIRECT_URI: &str = "https://alteian.github.io/aurivon/oauth/trakt.html";
+/// Official Aurivon Trakt API app (public client id; PKCE, no secret).
+pub const DEFAULT_CLIENT_ID: &str = "dWeb1RYO6eR5BRe5STAgs1_UvvxGtPK_tvHG6B-NabI";
 /// Loopback port the GitHub Pages callback forwards to (not registered with Trakt).
 const LOOPBACK: &str = "127.0.0.1:18787";
 

@@ -14,6 +14,7 @@ Usage: aurivon [options]
   --update           download, verify and install the newest version
   --pre              with --check-update/--update: include pre-releases
   --migrate          move files from legacy config folders (if any) and exit
+  --repair-db        fix library.db migration checksums (or recreate if unusable)
   --version          print the version
   --help             this help
 
@@ -61,11 +62,20 @@ fn main() -> anyhow::Result<()> {
         return update_cli(has("--update"), has("--pre"));
     }
 
+    if has("--repair-db") {
+        return repair_db_cli();
+    }
+
     if !migration.moved.is_empty() {
         tracing::info!("Moved {} item(s) into Aurivon data directories", migration.moved.len());
     }
     tracing::info!("Starting Aurivon {} (GPUI)", update::CURRENT_VERSION);
     rmh_gpui::run().map_err(anyhow::Error::msg)
+}
+
+fn repair_db_cli() -> anyhow::Result<()> {
+    println!("{}", rmh_app::repair_default_database().map_err(anyhow::Error::msg)?);
+    Ok(())
 }
 
 fn update_cli(install: bool, pre: bool) -> anyhow::Result<()> {

@@ -5,6 +5,18 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+### Added
+- Built-in Trakt public client id (PKCE); optional client-id override on Addons
+- `aurivon --repair-db` and Settings → Storage → **Repair library database** (checksum fix; if still unusable, backs up and recreates an empty library DB)
+- README + Integrations TMDB API key guide (key not baked into the app)
+
+### Changed
+- Settings uses category cards (Appearance, Libraries, Player, Integrations, …) instead of one long scroll; Addons is its own sidebar page (Ctrl+8)
+- Trakt connect / sync / scrobble moved from Settings to Addons
+
+### Fixed
+- Upgrading from older releases that only changed migration SQL comments no longer fails with "migration … was previously applied but has been modified"; startup syncs stored checksums to the current embedded migrations
+
 ## [0.9.0] - 2026-11-23
 
 ### Added

@@ -766,6 +766,7 @@ impl Render for MediaHubView {
                 Page::Calendar => self.calendar_page(p, cx),
                 Page::Details => self.details_page(p, cx),
                 Page::Person => self.person_page(p, cx),
+                Page::Addons => self.addons_page(p, cx),
                 Page::Settings => self.settings_page(p, cx),
                 Page::Player => self.home_page(p, cx),
             };

@@ -235,6 +235,30 @@ impl MediaHubView {
                         this.clear_bucket(rmh_app::StorageBucket::Torrents, cx);
                     }))),
             )
+            .child(div().text_sm().text_color(rgb(p.muted)).child(
+                "If the app fails to open after an update (migration checksum), use Repair — or quit and run aurivon --repair-db.",
+            ))
+            .child(
+                self.button("storage-repair-db", "Repair library database", false, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                    this.repair_database(cx);
+                })),
+            )
+    }
+
+    pub(crate) fn repair_database(&mut self, cx: &mut Context<Self>) {
+        let fut = self.svc.repair_database();
+        cx.spawn(async move |this, cx| {
+            let res = fut.await;
+            this.update(cx, |this, cx| {
+                match res {
+                    Ok(msg) => this.status = Some(msg),
+                    Err(e) => this.error = Some(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn refresh_cache_usage(&mut self) {
