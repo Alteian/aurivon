@@ -1,27 +1,38 @@
 //! Trakt.tv integration.
 //!
-//! - Login with the OAuth **device code** flow (no browser redirect needed):
-//!   [`TraktClient::start_device_login`] → show `user_code` + `verification_url`
-//!   → [`TraktClient::poll_device_login`] until approved.
+//! - Login with **OAuth Authorization Code + PKCE** (no `client_secret`):
+//!   [`TraktClient::start_pkce_login`] → open `auth_url` in a browser →
+//!   [`TraktClient::wait_for_pkce_login`] (HTTPS callback forwards to a local
+//!   listener) or [`TraktClient::complete_pkce_login`] with a pasted code.
 //! - Tokens are refreshed automatically and stored in
-//!   `~/.config/aurivon/trakt.json` (mode 0600). Secrets are never logged.
+//!   `~/.config/aurivon/trakt.json` (mode 0600). Tokens are never logged.
 //! - Scrobbling (`/scrobble/start|pause|stop`), watched history, playback
 //!   progress and watchlist.
 //!
-//! Requires a Trakt API app (client id + secret) from
-//! <https://trakt.tv/oauth/applications>.
+//! Requires a Trakt API app (client id only) from
+//! <https://trakt.tv/oauth/applications> with redirect URI
+//! [`REDIRECT_URI`].
 
 use anyhow::{anyhow, bail, Context, Result};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 const API: &str = "https://api.trakt.tv";
-const OOB: &str = "urn:ietf:wg:oauth:2.0:oob";
+const AUTH: &str = "https://auth.trakt.tv";
+/// Must match the redirect URI registered on the Trakt API app (HTTPS only).
+pub const REDIRECT_URI: &str = "https://alteian.github.io/aurivon/oauth/trakt.html";
+/// Loopback port the GitHub Pages callback forwards to (not registered with Trakt).
+const LOOPBACK: &str = "127.0.0.1:18787";
 
 /// Stored OAuth tokens
 #[derive(Clone, Serialize, Deserialize)]
@@ -72,26 +83,38 @@ impl TraktToken {
     }
 }
 
-/// Shown to the user while logging in
-#[derive(Debug, Clone, Deserialize)]
-pub struct DeviceCode {
-    pub device_code: String,
-    pub user_code: String,
-    pub verification_url: String,
-    pub expires_in: u64,
-    pub interval: u64,
+/// Browser step of a PKCE login (verifier stays inside the client).
+#[derive(Debug, Clone)]
+pub struct PkceLogin {
+    /// Open this URL in the system browser
+    pub auth_url: String,
+    pub redirect_uri: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum PollStatus {
-    /// User hasn't approved yet; poll again after `interval` seconds
-    Pending,
-    /// Polling too fast
-    SlowDown,
-    /// Logged in as this user
-    Approved(Option<String>),
-    /// Expired / denied / already used. Start over.
-    Failed(String),
+struct PendingPkce {
+    verifier: String,
+    state: String,
+    /// Bound in [`TraktClient::start_pkce_login`] so the browser can return immediately.
+    listener: Option<TcpListener>,
+}
+
+fn pkce_verifier() -> Result<String> {
+    // 64 chars from the unreserved set (43–128 required)
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+    let mut raw = [0u8; 64];
+    getrandom::getrandom(&mut raw).context("RNG failed for PKCE verifier")?;
+    Ok(raw.iter().map(|b| CHARS[(*b as usize) % CHARS.len()] as char).collect())
+}
+
+fn pkce_challenge_s256(verifier: &str) -> String {
+    let digest = Sha256::digest(verifier.as_bytes());
+    URL_SAFE_NO_PAD.encode(digest)
+}
+
+fn random_state() -> Result<String> {
+    let mut raw = [0u8; 16];
+    getrandom::getrandom(&mut raw).context("RNG failed for OAuth state")?;
+    Ok(URL_SAFE_NO_PAD.encode(raw))
 }
 
 /// What is being watched, in Trakt terms (TMDB ids are accepted by Trakt)
@@ -254,19 +277,26 @@ pub struct Watched {
 pub struct TraktClient {
     http: reqwest::Client,
     client_id: String,
-    client_secret: String,
     token_path: PathBuf,
     token: Arc<Mutex<Option<TraktToken>>>,
+    pending: Arc<Mutex<Option<PendingPkce>>>,
 }
 
 impl TraktClient {
-    pub fn new(client_id: impl Into<String>, client_secret: impl Into<String>, token_path: PathBuf) -> Result<Self> {
+    /// Public-client constructor (PKCE). No `client_secret`.
+    pub fn new(client_id: impl Into<String>, token_path: PathBuf) -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("Aurivon/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(20))
             .build()?;
         let token = TraktToken::load(&token_path);
-        Ok(Self { http, client_id: client_id.into(), client_secret: client_secret.into(), token_path, token: Arc::new(Mutex::new(token)) })
+        Ok(Self {
+            http,
+            client_id: client_id.into(),
+            token_path,
+            token: Arc::new(Mutex::new(token)),
+            pending: Arc::new(Mutex::new(None)),
+        })
     }
 
     pub async fn is_logged_in(&self) -> bool {
@@ -284,70 +314,95 @@ impl TraktClient {
             .header("trakt-api-key", &self.client_id)
     }
 
-    // ------------------------------------------------------------- login
+    // ------------------------------------------------------------- login (PKCE)
 
-    pub async fn start_device_login(&self) -> Result<DeviceCode> {
+    /// Start Authorization Code + PKCE. Binds the loopback callback first, then return
+    /// [`PkceLogin::auth_url`] to open in a browser.
+    pub async fn start_pkce_login(&self) -> Result<PkceLogin> {
+        let listener = TcpListener::bind(LOOPBACK)
+            .await
+            .with_context(|| format!("Could not bind {LOOPBACK} (is another Aurivon login open?)"))?;
+        let verifier = pkce_verifier()?;
+        let challenge = pkce_challenge_s256(&verifier);
+        let state = random_state()?;
+        let auth_url = format!(
+            "{AUTH}/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&state={}&code_challenge={}&code_challenge_method=S256",
+            urlencoding_encode(&self.client_id),
+            urlencoding_encode(REDIRECT_URI),
+            urlencoding_encode(&state),
+            urlencoding_encode(&challenge),
+        );
+        *self.pending.lock().await = Some(PendingPkce { verifier, state, listener: Some(listener) });
+        info!("Trakt PKCE: listening on http://{LOOPBACK}/callback");
+        Ok(PkceLogin { auth_url, redirect_uri: REDIRECT_URI.into() })
+    }
+
+    /// Wait for the HTTPS callback page to forward `?code=` to `http://127.0.0.1:18787/callback`.
+    pub async fn wait_for_pkce_login(&self) -> Result<Option<String>> {
+        let listener = {
+            let mut guard = self.pending.lock().await;
+            guard
+                .as_mut()
+                .and_then(|p| p.listener.take())
+                .ok_or_else(|| anyhow!("No Trakt login in progress — click Connect again"))?
+        };
+        let (code, state) = tokio::time::timeout(Duration::from_secs(15 * 60), accept_oauth_code(&listener))
+            .await
+            .context("Trakt login timed out (15 minutes)")??;
+        self.finish_with_code_and_state(&code, Some(&state)).await
+    }
+
+    /// Paste the `code` from the callback page if the automatic forward failed.
+    pub async fn complete_pkce_login(&self, code: &str) -> Result<Option<String>> {
+        self.finish_with_code_and_state(code.trim(), None).await
+    }
+
+    async fn finish_with_code_and_state(&self, code: &str, state: Option<&str>) -> Result<Option<String>> {
+        let pending = self
+            .pending
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| anyhow!("No Trakt login in progress — click Connect again"))?;
+        if let Some(s) = state {
+            if s != pending.state {
+                bail!("OAuth state mismatch — start login again");
+            }
+        }
+        if code.is_empty() {
+            bail!("Empty authorization code");
+        }
         let resp = self
-            .request(reqwest::Method::POST, "/oauth/device/code")
-            .json(&json!({ "client_id": self.client_id }))
+            .request(reqwest::Method::POST, "/oauth/token")
+            .json(&json!({
+                "code": code,
+                "client_id": self.client_id,
+                "grant_type": "authorization_code",
+                "redirect_uri": REDIRECT_URI,
+                "code_verifier": pending.verifier,
+            }))
             .send()
             .await
-            .context("Could not reach Trakt")?;
+            .context("Trakt token exchange failed")?;
         if !resp.status().is_success() {
-            bail!("Trakt rejected the client id ({}). Check the Trakt client id in Settings.", resp.status());
+            let body = resp.text().await.unwrap_or_default();
+            bail!("Trakt rejected the authorization code: {body}");
         }
-        Ok(resp.json().await?)
-    }
-
-    pub async fn poll_device_login(&self, code: &DeviceCode) -> Result<PollStatus> {
-        let resp = self
-            .request(reqwest::Method::POST, "/oauth/device/token")
-            .json(&json!({ "code": code.device_code, "client_id": self.client_id, "client_secret": self.client_secret }))
-            .send()
-            .await?;
-        Ok(match resp.status().as_u16() {
-            200 => {
-                let mut token: TraktToken = resp.json().await?;
-                *self.token.lock().await = Some(token.clone());
-                token.username = self.fetch_username().await.ok();
-                token.save(&self.token_path)?;
-                info!("Trakt login complete");
-                let name = token.username.clone();
-                *self.token.lock().await = Some(token);
-                PollStatus::Approved(name)
-            }
-            400 => PollStatus::Pending,
-            429 => PollStatus::SlowDown,
-            404 => PollStatus::Failed("Invalid device code".into()),
-            409 => PollStatus::Failed("Code already used".into()),
-            410 => PollStatus::Failed("Code expired, try again".into()),
-            418 => PollStatus::Failed("You denied the request on Trakt".into()),
-            401 | 403 => PollStatus::Failed("Trakt rejected the client secret. Check it in Settings.".into()),
-            s => PollStatus::Failed(format!("Trakt error {s}")),
-        })
-    }
-
-    /// Poll until approved, failed or expired
-    pub async fn wait_for_device_login(&self, code: &DeviceCode) -> Result<Option<String>> {
-        let mut interval = code.interval.max(1);
-        let deadline = std::time::Instant::now() + Duration::from_secs(code.expires_in);
-        while std::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_secs(interval)).await;
-            match self.poll_device_login(code).await? {
-                PollStatus::Pending => {}
-                PollStatus::SlowDown => interval += 1,
-                PollStatus::Approved(user) => return Ok(user),
-                PollStatus::Failed(msg) => bail!(msg),
-            }
-        }
-        bail!("Trakt login timed out")
+        let mut token: TraktToken = resp.json().await?;
+        token.username = self.fetch_username_with(&token.access_token).await.ok();
+        token.save(&self.token_path)?;
+        let name = token.username.clone();
+        *self.token.lock().await = Some(token);
+        info!("Trakt PKCE login complete");
+        Ok(name)
     }
 
     pub async fn logout(&self) -> Result<()> {
+        *self.pending.lock().await = None;
         if let Some(t) = self.token.lock().await.take() {
             let _ = self
                 .request(reqwest::Method::POST, "/oauth/revoke")
-                .json(&json!({ "token": t.access_token, "client_id": self.client_id, "client_secret": self.client_secret }))
+                .json(&json!({ "token": t.access_token, "client_id": self.client_id }))
                 .send()
                 .await;
         }
@@ -361,19 +416,20 @@ impl TraktClient {
         if !token.needs_refresh() {
             return Ok(token.access_token);
         }
+        // Public client refresh: client_id only (no secret), refresh tokens rotate
         let resp = self
             .request(reqwest::Method::POST, "/oauth/token")
             .json(&json!({
                 "refresh_token": token.refresh_token,
                 "client_id": self.client_id,
-                "client_secret": self.client_secret,
-                "redirect_uri": OOB,
-                "grant_type": "refresh_token"
+                "grant_type": "refresh_token",
+                "redirect_uri": REDIRECT_URI,
             }))
             .send()
             .await?;
         if !resp.status().is_success() {
-            warn!("Trakt token refresh failed: {}", resp.status());
+            let body = resp.text().await.unwrap_or_default();
+            warn!("Trakt token refresh failed: {body}");
             *guard = None;
             let _ = std::fs::remove_file(&self.token_path);
             bail!("Trakt session expired, please log in again");
@@ -411,12 +467,16 @@ impl TraktClient {
         Ok(resp.json().await.unwrap_or(Value::Null))
     }
 
-    async fn fetch_username(&self) -> Result<String> {
+    async fn fetch_username_with(&self, access: &str) -> Result<String> {
         #[derive(Deserialize)]
         struct Me {
             username: String,
         }
-        Ok(self.get::<Me>("/users/me").await?.username)
+        let resp = self.request(reqwest::Method::GET, "/users/me").bearer_auth(access).send().await?;
+        if !resp.status().is_success() {
+            bail!("Trakt /users/me failed: {}", resp.status());
+        }
+        Ok(resp.json::<Me>().await?.username)
     }
 
     // ---------------------------------------------------------- scrobble
@@ -544,6 +604,90 @@ impl TraktClient {
     pub async fn add_show_to_watchlist(&self, show_tmdb: i64) -> Result<()> {
         self.post("/sync/watchlist", json!({ "shows": [{ "ids": { "tmdb": show_tmdb } }] })).await.map(|_| ())
     }
+}
+
+fn urlencoding_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Minimal HTTP/1.1 GET parser for the loopback OAuth callback.
+async fn accept_oauth_code(listener: &TcpListener) -> Result<(String, String)> {
+    loop {
+        let (mut socket, _) = listener.accept().await?;
+        let mut buf = vec![0u8; 4096];
+        let n = socket.read(&mut buf).await.unwrap_or(0);
+        let req = String::from_utf8_lossy(&buf[..n]);
+        let line = req.lines().next().unwrap_or("");
+        let path = line.split_whitespace().nth(1).unwrap_or("");
+        let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let mut code = None;
+        let mut state = None;
+        let mut error = None;
+        for part in query.split('&') {
+            let mut kv = part.splitn(2, '=');
+            let k = kv.next().unwrap_or("");
+            let v = urlencoding_decode(kv.next().unwrap_or(""));
+            match k {
+                "code" => code = Some(v),
+                "state" => state = Some(v),
+                "error" => error = Some(v),
+                _ => {}
+            }
+        }
+        let body = if code.is_some() {
+            "<!doctype html><title>Aurivon</title><p>Connected — you can close this tab and return to Aurivon.</p>"
+        } else {
+            "<!doctype html><title>Aurivon</title><p>Login failed. Return to Aurivon and try again.</p>"
+        };
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = socket.write_all(resp.as_bytes()).await;
+        let _ = socket.shutdown().await;
+        if let Some(err) = error {
+            bail!("Trakt authorization denied: {err}");
+        }
+        if let (Some(c), Some(s)) = (code, state) {
+            return Ok((c, s));
+        }
+    }
+}
+
+fn urlencoding_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hex = &s[i + 1..i + 3];
+                if let Ok(v) = u8::from_str_radix(hex, 16) {
+                    out.push(v);
+                    i += 3;
+                } else {
+                    out.push(b'%');
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Body for /sync/history and /sync/watchlist

@@ -1,6 +1,6 @@
 [package]
 name = "rmh-trakt"
-description = "Trakt.tv integration: device login, scrobbling, history and watchlist sync"
+description = "Trakt.tv integration: PKCE login, scrobbling, history and watchlist sync"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,3 +15,6 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
+sha2 = "0.10"
+base64 = "0.22"
+getrandom = "0.2"

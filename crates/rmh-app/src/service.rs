@@ -260,8 +260,8 @@ impl MediaService {
         if let Ok(mut s) = self.inner.scraper.write() {
             *s = Some(Arc::new(ScraperAddon::new(sc)));
         }
-        let trakt = cfg.trakt_credentials().and_then(|(id, secret)| {
-            rmh_trakt::TraktClient::new(id, secret, self.inner.trakt_token_path.clone())
+        let trakt = cfg.trakt_id().and_then(|id| {
+            rmh_trakt::TraktClient::new(id, self.inner.trakt_token_path.clone())
                 .map_err(|e| tracing::warn!("Trakt client: {e:#}"))
                 .ok()
         });

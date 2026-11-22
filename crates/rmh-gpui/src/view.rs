@@ -12,7 +12,7 @@ use gpui_kit::*;
 use rmh_app::{
     is_audio, next_episode, resume_position, Details, Episode, HomeLayout, Library, LibraryEntry, MediaService,
     NowPlaying, PlaybackSnapshot, Player, PlayerConfig, ProgressUpdate, StreamHit, TickOutcome, TitleCard, TitleKind,
-    TraktDeviceCode, TraktItem, TraktLists, TraktStatus, VideoMode,
+    TraktItem, TraktLists, TraktStatus, VideoMode,
 };
 use uuid::Uuid;
 
@@ -175,7 +175,6 @@ pub struct MediaHubView {
     pub(crate) rd_input: Entity<InputState>,
     pub(crate) mpv_input: Entity<InputState>,
     pub(crate) trakt_id_input: Entity<InputState>,
-    pub(crate) trakt_secret_input: Entity<InputState>,
     pub(crate) alang_input: Entity<InputState>,
     pub(crate) slang_input: Entity<InputState>,
 
@@ -200,7 +199,8 @@ pub struct MediaHubView {
 
     // trakt
     pub(crate) trakt: TraktStatus,
-    pub(crate) trakt_code: Option<TraktDeviceCode>,
+    /// True while browser PKCE login is waiting for the callback
+    pub(crate) trakt_waiting: bool,
     pub(crate) trakt_lists: TraktLists,
     pub(crate) trakt_cards: Vec<TitleCard>,
 
@@ -267,7 +267,6 @@ impl MediaHubView {
         let rd_input = input(cx, window, "Real-Debrid API key (optional)", opt(&config.real_debrid_api_key), true);
         let mpv_input = input(cx, window, "mpv", mpv_path.clone(), false);
         let trakt_id_input = input(cx, window, "Trakt client id", opt(&config.trakt_client_id), true);
-        let trakt_secret_input = input(cx, window, "Trakt client secret", opt(&config.trakt_client_secret), true);
         let alang_input = input(cx, window, "e.g. cze,eng", opt(&config.audio_lang), false);
         let slang_input = input(cx, window, "e.g. eng,cze", opt(&config.sub_lang), false);
 
@@ -334,7 +333,6 @@ impl MediaHubView {
             rd_input,
             mpv_input,
             trakt_id_input,
-            trakt_secret_input,
             alang_input,
             slang_input,
             results: Vec::new(),
@@ -350,7 +348,7 @@ impl MediaHubView {
             stream_ctx: None,
             streams_loading: false,
             trakt: TraktStatus::default(),
-            trakt_code: None,
+            trakt_waiting: false,
             trakt_lists: TraktLists::default(),
             trakt_cards: Vec::new(),
             now: None,
@@ -1723,22 +1721,23 @@ impl MediaHubView {
         let begin = self.svc.trakt_begin_login();
         let svc = self.svc.clone();
         cx.spawn(async move |this, cx| {
-            let code = match begin.await {
-                Ok(c) => c,
+            let login = match begin.await {
+                Ok(l) => l,
                 Err(e) => {
                     this.update(cx, |this, cx| this.notify_error(e, cx)).ok();
                     return;
                 }
             };
             this.update(cx, |this, cx| {
-                this.trakt_code = Some(code.clone());
-                this.status = Some(format!("Enter {} at {}", code.user_code, code.verification_url));
+                this.trakt_waiting = true;
+                this.status = Some("Complete sign-in in your browser…".into());
+                cx.open_url(&login.auth_url);
                 cx.notify();
             })
             .ok();
-            let res = svc.trakt_finish_login(code).await;
+            let res = svc.trakt_finish_login().await;
             this.update(cx, |this, cx| {
-                this.trakt_code = None;
+                this.trakt_waiting = false;
                 match res {
                     Ok(user) => {
                         this.status = Some(format!("Connected to Trakt{}", user.map(|u| format!(" as {u}")).unwrap_or_default()));
@@ -1851,7 +1850,6 @@ impl MediaHubView {
         cfg.real_debrid_api_key = read(&self.rd_input, cx);
         cfg.mpv_path = read(&self.mpv_input, cx);
         cfg.trakt_client_id = read(&self.trakt_id_input, cx);
-        cfg.trakt_client_secret = read(&self.trakt_secret_input, cx);
         cfg.audio_lang = read(&self.alang_input, cx);
         cfg.sub_lang = read(&self.slang_input, cx);
         let mpv = cfg.mpv_path();

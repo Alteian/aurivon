@@ -22,6 +22,14 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 ### Fixed
 - Restored migration 001 byte-for-byte (a comment edit in 0.6.0 made existing databases fail with "migration 1 was previously applied but has been modified")
 
+## [0.7.1] - 2026-11-23
+
+### Fixed
+- Linux CI/release link: install `libxcb1-dev` + `libxkbcommon-x11-dev` so mold can resolve `-lxcb` / `-lxkbcommon-x11`
+
+### Changed
+- Trakt login uses OAuth Authorization Code + PKCE (S256): client id only, HTTPS redirect via GitHub Pages → loopback; `client_secret` and device-code / oob flow removed (re-auth required)
+
 ## [0.7.0] - 2026-11-22
 
 ### Added

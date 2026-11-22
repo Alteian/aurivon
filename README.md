@@ -113,7 +113,8 @@ typical desktop. `libmpv-dev` is **not** needed (mpv is driven over IPC, not lin
 ```bash
 sudo apt update
 sudo apt install -y build-essential pkg-config libssl-dev \
-    mpv libxkbcommon-dev libwayland-dev libvulkan-dev
+    mpv libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+    libwayland-dev libvulkan-dev
 # optional, only for running the playback tests:
 sudo apt install -y ffmpeg
 ```
@@ -124,12 +125,13 @@ present on GNOME/KDE/COSMIC). If it is unavailable, type the folder path instead
 **Fedora:**
 ```bash
 sudo dnf install -y gcc gcc-c++ pkg-config openssl-devel mpv \
-    libxkbcommon-devel wayland-devel vulkan-loader-devel
+    libxkbcommon-devel libxkbcommon-x11-devel libxcb-devel \
+    wayland-devel vulkan-loader-devel
 ```
 
 **Arch Linux:**
 ```bash
-sudo pacman -S --needed base-devel pkgconf openssl mpv libxkbcommon wayland vulkan-icd-loader
+sudo pacman -S --needed base-devel pkgconf openssl mpv libxkbcommon libxcb wayland vulkan-icd-loader
 ```
 
 **macOS:**
@@ -317,15 +319,20 @@ tags, pushes and creates the GitHub release. CI then attaches
 
 ### Trakt
 
+Uses **OAuth Authorization Code + PKCE** (S256). No `client_secret` — do not ship one
+in the app or `.env`.
+
 1. Create an API app at <https://trakt.tv/oauth/applications> with redirect URI
-   `urn:ietf:wg:oauth:2.0:oob`.
-2. Paste its client id + secret in Settings → Services → Trakt (or set
-   `TRAKT_CLIENT_ID` / `TRAKT_CLIENT_SECRET`) and click **Save & connect**.
-3. Enter the shown code at <https://trakt.tv/activate>. The token is stored in
-   `~/.config/aurivon/trakt.json` (mode 0600).
+   `https://alteian.github.io/aurivon/oauth/trakt.html` (HTTPS only; same value as
+   `rmh_trakt::REDIRECT_URI`).
+2. Paste the **client id** in Settings → Services → Trakt (or set `TRAKT_CLIENT_ID`)
+   and click **Save & connect**. A browser opens for Trakt approval.
+3. The GitHub Pages callback forwards the code to `http://127.0.0.1:18787` inside
+   Aurivon. The token is stored in `~/.config/aurivon/trakt.json` (mode 0600).
 
 Then playback is scrobbled (start/pause/stop), **Sync now** syncs watched history both
-ways, and Trakt watchlist / progress rows appear on Home.
+ways, and Trakt watchlist / progress rows appear on Home. Re-authenticate once after
+upgrading from device-code / client-secret login.
 
 ### More services (Settings → More services)
 

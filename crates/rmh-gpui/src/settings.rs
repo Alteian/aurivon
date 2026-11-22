@@ -156,8 +156,9 @@ impl MediaHubView {
 
         // Services
         let trakt_state = match (self.trakt.configured, self.trakt.logged_in) {
-            (false, _) => "Not set up: create an API app at trakt.tv/oauth/applications (redirect uri: urn:ietf:wg:oauth:2.0:oob) and paste its client id + secret.".to_string(),
-            (true, false) => "Credentials saved. Click Connect and enter the code on trakt.tv/activate.".to_string(),
+            (false, _) => "Not set up: create an API app at trakt.tv/oauth/applications with redirect URI https://alteian.github.io/aurivon/oauth/trakt.html and paste its client id (no secret).".to_string(),
+            (true, false) if self.trakt_waiting => "Browser opened. Approve Aurivon, then return here.".to_string(),
+            (true, false) => "Client id saved. Click Connect — a browser window opens for Trakt PKCE login.".to_string(),
             (true, true) => format!("Connected{}. Playback is scrobbled; Sync marks watched both ways.", self.trakt.username.clone().map(|u| format!(" as {u}")).unwrap_or_default()),
         };
         let mut trakt_actions = div().flex().flex_wrap().gap_2();
@@ -167,7 +168,7 @@ impl MediaHubView {
                 .child(self.button("trakt-out", "Disconnect", false, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.trakt_disconnect(cx))));
         } else {
             trakt_actions = trakt_actions.child(
-                self.button("trakt-in", if self.trakt_code.is_some() { "Waiting for approval…" } else { "Save & connect" }, true, p)
+                self.button("trakt-in", if self.trakt_waiting { "Waiting for browser…" } else { "Save & connect" }, true, p)
                     .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.trakt_connect(cx))),
             );
         }
@@ -192,26 +193,7 @@ impl MediaHubView {
             .child(div().h(px(4.0)))
             .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("Trakt"))
             .child(div().text_xs().text_color(rgb(p.muted)).child(trakt_state))
-            .child(
-                div()
-                    .flex()
-                    .gap_4()
-                    .child(div().flex_1().child(self.field("Client id", "From your Trakt API app", &self.trakt_id_input, p)))
-                    .child(div().flex_1().child(self.field("Client secret", "Stored in ~/.config/aurivon (0600)", &self.trakt_secret_input, p))),
-            )
-            .when_some(self.trakt_code.clone(), |d, code| {
-                d.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_4()
-                        .p_4()
-                        .rounded_xl()
-                        .bg(rgb(p.accent_soft))
-                        .child(div().text_3xl().font_weight(FontWeight::BOLD).child(code.user_code.clone()))
-                        .child(div().text_sm().child(format!("Open {} and enter this code. Waiting…", code.verification_url))),
-                )
-            })
+            .child(self.field("Client id", "Public client id from your Trakt API app (no secret)", &self.trakt_id_input, p))
             .child(trakt_actions)
             .when(self.trakt.logged_in, |d| {
                 d.child(
