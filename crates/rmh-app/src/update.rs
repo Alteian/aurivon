@@ -3,9 +3,9 @@
 //! Releases are cut by `scripts/release.sh`; CI (`.github/workflows/release.yml`)
 //! attaches `aurivon-<version>-<arch>-linux.tar.gz` and a matching `.sha256`.
 //! Public releases work without auth. An optional GitHub token (for rate limits)
-//! is taken from `RMH_GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN`,
-//! `~/.config/aurivon/github_token`, or `gh auth token`. Tokens are never
-//! logged or stored by the app.
+//! is taken from `AURIVON_GITHUB_TOKEN` / `RMH_GITHUB_TOKEN` / `GH_TOKEN` /
+//! `GITHUB_TOKEN`, `~/.config/aurivon/github_token`, or `gh auth token`.
+//! Tokens are never logged or stored by the app.
 //!
 //! Installed layout (see `scripts/install.sh`):
 //! ```text
@@ -87,9 +87,12 @@ pub fn asset_name(version: &Version) -> String {
     format!("aurivon-{version}-{}-linux.tar.gz", arch())
 }
 
-/// A GitHub token for the private release repo; never logged
+/// Optional GitHub token (rate limits / private forks); never logged
 fn github_token() -> Option<String> {
-    for var in ["RMH_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
+    if let Some(t) = crate::config::env_alias("AURIVON_GITHUB_TOKEN", "RMH_GITHUB_TOKEN") {
+        return Some(t);
+    }
+    for var in ["GH_TOKEN", "GITHUB_TOKEN"] {
         if let Ok(t) = std::env::var(var) {
             if !t.trim().is_empty() {
                 return Some(t.trim().to_string());
@@ -157,7 +160,19 @@ struct GhRelease {
 #[derive(serde::Deserialize)]
 struct GhAsset {
     name: String,
+    /// API asset URL (needs `Accept: application/octet-stream`; may count against rate limit)
     url: String,
+    /// Direct CDN link for public releases — preferred for downloads (no API auth)
+    #[serde(default)]
+    browser_download_url: Option<String>,
+}
+
+fn asset_download_url(a: &GhAsset) -> String {
+    a.browser_download_url
+        .as_deref()
+        .filter(|u| !u.is_empty())
+        .unwrap_or(&a.url)
+        .to_string()
 }
 
 /// Pick the newest usable release (pure, for tests)
@@ -173,14 +188,18 @@ fn pick_latest(releases: Vec<GhRelease>, include_pre: bool) -> Option<ReleaseInf
             }
             let asset_name = asset_name(&version);
             let asset = r.assets.iter().find(|a| a.name == asset_name)?;
-            let sha_url = r.assets.iter().find(|a| a.name == format!("{asset_name}.sha256")).map(|a| a.url.clone());
+            let sha_url = r
+                .assets
+                .iter()
+                .find(|a| a.name == format!("{asset_name}.sha256"))
+                .map(asset_download_url);
             Some(ReleaseInfo {
                 name: r.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| r.tag_name.clone()),
                 notes: r.body.clone().unwrap_or_default(),
                 html_url: r.html_url.clone(),
                 published_at: r.published_at.clone().unwrap_or_default(),
                 prerelease: pre,
-                asset_url: asset.url.clone(),
+                asset_url: asset_download_url(asset),
                 asset_name,
                 sha_url,
                 tag: r.tag_name,
@@ -240,9 +259,12 @@ pub async fn check(include_pre: bool) -> anyhow::Result<UpdateCheck> {
 }
 
 async fn download(url: &str, token: &Option<String>) -> anyhow::Result<Vec<u8>> {
-    // GitHub answers with a redirect to object storage; reqwest drops the
-    // Authorization header when the redirect leaves api.github.com
-    let resp = authed(client()?.get(url), token).header("Accept", "application/octet-stream").send().await?;
+    // Public `browser_download_url` hits GitHub's CDN — no token, no API quota.
+    // API asset URLs need Accept: application/octet-stream; reqwest drops
+    // Authorization when the redirect leaves api.github.com.
+    let cdn = url.contains("://github.com/") && url.contains("/releases/download/");
+    let req = client()?.get(url).header("Accept", "application/octet-stream");
+    let resp = if cdn { req } else { authed(req, token) }.send().await?;
     if !resp.status().is_success() {
         anyhow::bail!("download failed: HTTP {}", resp.status());
     }
@@ -387,8 +409,16 @@ mod tests {
         let v = Version::parse(tag.trim_start_matches('v')).unwrap();
         let assets = if with_asset {
             vec![
-                GhAsset { name: asset_name(&v), url: format!("u/{tag}") },
-                GhAsset { name: format!("{}.sha256", asset_name(&v)), url: format!("s/{tag}") },
+                GhAsset {
+                    name: asset_name(&v),
+                    url: format!("u/{tag}"),
+                    browser_download_url: Some(format!("https://github.com/x/y/releases/download/{tag}/a.tar.gz")),
+                },
+                GhAsset {
+                    name: format!("{}.sha256", asset_name(&v)),
+                    url: format!("s/{tag}"),
+                    browser_download_url: None,
+                },
             ]
         } else {
             vec![]
@@ -410,7 +440,8 @@ mod tests {
         let list = || vec![rel("v0.2.0", false, true), rel("v0.10.0", false, true), rel("v0.9.5", false, true), rel("v0.11.0-beta.1", true, true), rel("v0.12.0", false, false)];
         let r = pick_latest(list(), false).unwrap();
         assert_eq!(r.version.to_string(), "0.10.0"); // semver, not string order; no asset -> skipped
-        assert_eq!(r.sha_url.as_deref(), Some("s/v0.10.0"));
+        assert_eq!(r.sha_url.as_deref(), Some("s/v0.10.0")); // no CDN url → API url
+        assert!(r.asset_url.contains("/releases/download/")); // prefers browser_download_url
         let r = pick_latest(list(), true).unwrap();
         assert_eq!(r.version.to_string(), "0.11.0-beta.1");
     }

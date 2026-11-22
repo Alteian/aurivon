@@ -87,7 +87,7 @@ impl ScraperAddon {
 
         Self {
             manifest: AddonManifest::new(
-                "org.rustmediahub.scraper",
+                "org.aurivon.scraper",
                 "Scraper",
                 "1.0.0",
             )
@@ -378,6 +378,6 @@ mod tests {
     async fn test_scraper_addon_creation() {
         let addon = create_scraper_addon(Some("test_key"));
         assert!(addon.has_real_debrid());
-        assert_eq!(addon.manifest().id, "org.rustmediahub.scraper");
+        assert_eq!(addon.manifest().id, "org.aurivon.scraper");
     }
 }

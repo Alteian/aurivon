@@ -37,7 +37,7 @@ impl LocalFilesAddon {
     pub fn new(library_paths: Vec<PathBuf>) -> Self {
         Self {
             manifest: AddonManifest::new(
-                "org.rustmediahub.local-files",
+                "org.aurivon.local-files",
                 "Local Files",
                 "1.0.0",
             )

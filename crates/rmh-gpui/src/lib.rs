@@ -28,7 +28,7 @@ pub use view::{MediaHubView, Page};
 /// run GPUI through XWayland instead, unless the user opted out.
 fn choose_backend() {
     let cfg = AppConfig::load().unwrap_or_default();
-    let want_embed = cfg.video_mode == VideoMode::Embedded && std::env::var_os("RMH_FORCE_WAYLAND").is_none();
+    let want_embed = cfg.video_mode == VideoMode::Embedded && !rmh_app::env_flag("AURIVON_FORCE_WAYLAND", "RMH_FORCE_WAYLAND");
     if want_embed && std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var_os("DISPLAY").is_some() {
         tracing::info!("Embedded video: using XWayland for the app window");
         // SAFETY: called at startup before any other thread exists

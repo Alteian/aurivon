@@ -14,8 +14,42 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-24.04
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+      package: ${{ steps.filter.outputs.package }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'src/**'
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.github/workflows/ci.yml'
+            package:
+              - 'src/**'
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'packaging/**'
+              - 'scripts/package.sh'
+              - 'scripts/install.sh'
+              - 'scripts/uninstall.sh'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/release.yml'
+
   check:
     name: Check & test
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -44,7 +78,13 @@ jobs:
   package:
     name: Package Linux tarball
     runs-on: ubuntu-24.04
-    needs: check
+    needs: [changes, check]
+    # Skip docs-only pushes. packaging/**-only still builds the tarball (check skipped).
+    if: |
+      always()
+      && needs.changes.outputs.package == 'true'
+      && needs.check.result != 'failure'
+      && needs.check.result != 'cancelled'
     steps:
       - uses: actions/checkout@v4
 
@@ -60,10 +100,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: linux-x86_64
+          shared-key: linux-x86_64-release
 
       - name: Build package
         run: |
+          # package.sh builds only --bin aurivon (not the whole workspace)
           TAR=$(./scripts/package.sh | tee /dev/stderr | tail -n 1)
           echo "TAR=$TAR" >> "$GITHUB_ENV"
           echo "SUM=${TAR}.sha256" >> "$GITHUB_ENV"

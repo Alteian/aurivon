@@ -7,6 +7,10 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ### Added
 - GitHub Actions CI (check/test + Linux tarball artifact) and Release workflow that attaches `aurivon-*-x86_64-linux.tar.gz` to `v*` tags; `./install.sh` inside the archive is the user installer
+
+### Changed
+- Branding/docs/env: prefer `AURIVON_*` over legacy `RMH_*` (still accepted); addon ids `org.aurivon.*`; docs refer only to Aurivon paths (`~/.config/aurivon`, etc.)
+- Updater downloads public release assets via CDN (`browser_download_url`); CI packages only when code/packaging paths change
 - Settings → Storage: usage by images / torrents / TMDB / calendar / subtitles, image + torrent caps, prune/clear, low-power mode, prefer-debrid-when-disk-full
 - Torrent orphan cleanup on startup and engine init; `stop_stream` can delete data; configurable torrent cache size
 - Watchlist page (nav ★ / Ctrl+3) with bi-directional Trakt sync; local remove also removes on Trakt; single Home watchlist row

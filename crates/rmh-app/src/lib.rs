@@ -26,7 +26,7 @@ pub mod migrate;
 
 pub use catalog::{next_episode, up_next, LibraryEntry, SeasonSummary, TitleCard, TitleKind};
 pub use calendar::{month_grid, CalendarItem, CalendarMonth, ReleaseKind};
-pub use config::{lang_code, AppConfig, HomeLayout, InstalledAddon, TraktWatchlistPolicy, VideoMode};
+pub use config::{env_alias, env_flag, lang_code, AppConfig, HomeLayout, InstalledAddon, TraktWatchlistPolicy, VideoMode};
 pub use storage::{StorageBucket, StorageReport};
 pub use images::CacheUsage;
 pub use discovery::{

@@ -211,6 +211,12 @@ cd aurivon-*
 ./install.sh          # ~/.local — launcher entry, icons, no root
 ```
 
+After that first install, friends stay current via the in-app updater (Settings → Updates,
+or `aurivon --update`): it checks GitHub Releases on startup / every 6 hours, downloads the
+new tarball, verifies sha256, installs side-by-side under `~/.local/share/aurivon/app/versions/`,
+and swaps `current` atomically. CI only rebuilds the Linux package when code or packaging
+files change (docs-only pushes skip the heavy job).
+
 **From a checkout:**
 
 ```bash
@@ -228,8 +234,8 @@ make package        # dist/aurivon-<version>-<arch>-linux.tar.gz + .sha256
   `make install` copies `TMDB_API_KEY` and `REAL_DEBRID_API_KEY` there from the repo `.env`
   the first time; Settings can override them. Other services are optional.
 - On Wayland the launcher runs the app through XWayland so video stays embedded.
-- Renamed from RustMediaHub: the first start (or `make install`) moves settings, keys, library
-  and caches from the old `rustmediahub` folders to `aurivon` and removes the old launcher entry.
+- Data lives under Aurivon paths only: `~/.config/aurivon`, `~/.local/share/aurivon`,
+  `~/.cache/aurivon`, `~/.local/state/aurivon`.
 
 **Updates.** Releases are GitHub releases tagged `vMAJOR.MINOR.PATCH` with a tarball and
 its sha256 (built by `.github/workflows/release.yml`). The app checks on startup and every
@@ -243,7 +249,7 @@ aurivon --check-update     # add --pre to include pre-releases
 aurivon --update
 ```
 
-Public releases need no GitHub token. A token (`gh auth login`, `RMH_GITHUB_TOKEN`, or
+Public releases need no GitHub token. A token (`gh auth login`, `AURIVON_GITHUB_TOKEN`, or
 `~/.config/aurivon/github_token`) is only useful for higher API rate limits.
 
 **Releasing.** From a clean tree (normally on `master`):
@@ -343,7 +349,7 @@ cargo run -p rmh-player --example play -- /path/to/video.mkv
 
 ### Experimental: embed mpv into the app window
 
-`RMH_EMBED_PLAYER=1 WINIT_UNIX_BACKEND=x11 cargo run` embeds mpv via `--wid` (X11/XWayland only).
+`AURIVON_EMBED_PLAYER=1 WINIT_UNIX_BACKEND=x11 cargo run` embeds mpv via `--wid` (X11/XWayland only).
 The video then covers the app window; press `q` in it to return.
 
 ## Supported Formats

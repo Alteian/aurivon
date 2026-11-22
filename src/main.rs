@@ -13,7 +13,7 @@ Usage: aurivon [options]
   --check-update     check GitHub releases for a newer version
   --update           download, verify and install the newest version
   --pre              with --check-update/--update: include pre-releases
-  --migrate          move files from the old rustmediahub folders and exit
+  --migrate          move files from legacy config folders (if any) and exit
   --version          print the version
   --help             this help
 
@@ -32,14 +32,17 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Aurivon used to be called RustMediaHub (briefly Lyrion): move old config/library/cache dirs
+    // One-shot move from pre-rename folders into ~/.config/aurivon (etc.)
     let migration = rmh_app::migrate::migrate_legacy_dirs();
     if has("--migrate") {
         for p in &migration.moved {
             println!("moved {}", p.display());
         }
         for p in &migration.skipped {
-            println!("kept {} (already exists in the new location)", p.display());
+            println!("kept {} (already exists under aurivon)", p.display());
+        }
+        if migration.moved.is_empty() && migration.skipped.is_empty() {
+            println!("nothing to migrate; Aurivon paths are already in use");
         }
         return Ok(());
     }
@@ -59,7 +62,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     if !migration.moved.is_empty() {
-        tracing::info!("Moved {} item(s) from the old rustmediahub folders to aurivon", migration.moved.len());
+        tracing::info!("Moved {} item(s) into Aurivon data directories", migration.moved.len());
     }
     tracing::info!("Starting Aurivon {} (GPUI)", update::CURRENT_VERSION);
     rmh_gpui::run().map_err(anyhow::Error::msg)

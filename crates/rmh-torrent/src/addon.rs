@@ -27,7 +27,7 @@ impl TorrentAddon {
     pub fn with_config(config: TorrentEngineConfig) -> Self {
         Self {
             manifest: AddonManifest::new(
-                "org.rustmediahub.torrent",
+                "org.aurivon.torrent",
                 "Torrent Streaming",
                 "1.0.0",
             )

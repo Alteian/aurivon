@@ -5,6 +5,23 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::info;
 
+/// Read `AURIVON_*` first, then the legacy `RMH_*` name (pre-rename).
+pub fn env_alias(aurivon: &str, legacy_rmh: &str) -> Option<String> {
+    for key in [aurivon, legacy_rmh] {
+        if let Ok(v) = std::env::var(key) {
+            let t = v.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+    }
+    None
+}
+
+pub fn env_flag(aurivon: &str, legacy_rmh: &str) -> bool {
+    matches!(env_alias(aurivon, legacy_rmh).as_deref(), Some("1") | Some("true") | Some("yes"))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub tmdb_api_key: Option<String>,

@@ -14,9 +14,9 @@ fn main() -> Result<()> {
     init_logging();
 
     // Video plays in mpv's own window, controlled from the app's now-playing bar.
-    // Experimental: RMH_EMBED_PLAYER=1 embeds mpv into the app window (X11/XWayland only).
-    if std::env::var("RMH_EMBED_PLAYER").as_deref() == Ok("1") {
-        info!("RMH_EMBED_PLAYER=1: mpv will be embedded into the main window (X11 only)");
+    // Experimental: AURIVON_EMBED_PLAYER=1 embeds mpv into the app window (X11/XWayland only).
+    if rmh_app::env_flag("AURIVON_EMBED_PLAYER", "RMH_EMBED_PLAYER") {
+        info!("AURIVON_EMBED_PLAYER=1: mpv will be embedded into the main window (X11 only)");
     }
 
     info!("Starting Aurivon");

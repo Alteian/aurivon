@@ -25,9 +25,11 @@ pub struct UpdateUi {
     pub last_check: Option<Instant>,
 }
 
-/// How often to look for a release (`RMH_UPDATE_INTERVAL_SECS` overrides, for testing)
+/// How often to look for a release (`AURIVON_UPDATE_INTERVAL_SECS` overrides, for testing)
 fn interval() -> Duration {
-    let secs = std::env::var("RMH_UPDATE_INTERVAL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(6 * 3600);
+    let secs = rmh_app::env_alias("AURIVON_UPDATE_INTERVAL_SECS", "RMH_UPDATE_INTERVAL_SECS")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(6 * 3600);
     Duration::from_secs(secs.max(60))
 }
 

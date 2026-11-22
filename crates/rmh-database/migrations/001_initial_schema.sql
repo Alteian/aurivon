@@ -1,4 +1,4 @@
--- RustMediaHub Database Schema
+-- Aurivon database schema
 -- Migration: 001_initial_schema
 
 -- Libraries table: folders/sources being scanned

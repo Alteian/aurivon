@@ -27,7 +27,7 @@ INTEGRATE_ONLY=0
 if [ ! -f "$HERE/VERSION" ] && [ -f "$HERE/../Cargo.toml" ]; then
     REPO=$(cd "$HERE/.." && pwd)
     PKG=$("$REPO/scripts/package.sh" --dir-only | tail -n 1)
-    RMH_KEYS_FROM="${RMH_KEYS_FROM:-$REPO/.env}" exec "$PKG/install.sh" "$@"
+    AURIVON_KEYS_FROM="${AURIVON_KEYS_FROM:-${RMH_KEYS_FROM:-$REPO/.env}}" exec "$PKG/install.sh" "$@"
 fi
 
 VERSION=$(cat "$HERE/VERSION")
@@ -49,14 +49,13 @@ if [ $INTEGRATE_ONLY -eq 0 ]; then
     mv -T "$APP_ROOT/.current-$$" "$APP_ROOT/current"
 fi
 
-# Aurivon was called RustMediaHub: remove that install (launcher, menu entry, icons,
-# binaries) and move its settings, keys and library to the aurivon folders
+# Remove any leftover pre-rename install bits, then migrate config/library if needed
 if [ $INTEGRATE_ONLY -eq 0 ]; then
     if [ -e "$DATA/rustmediahub/app" ] || [ -e "$HOME/.local/bin/rustmediahub" ] || [ -e "$DATA/applications/rustmediahub.desktop" ]; then
         rm -rf "$DATA/rustmediahub/app"
         rm -f "$HOME/.local/bin/rustmediahub" "$DATA/applications/rustmediahub.desktop"
         rm -f "$DATA"/icons/hicolor/*/apps/rustmediahub.png "$DATA/icons/hicolor/scalable/apps/rustmediahub.svg"
-        echo "Removed the old RustMediaHub install"
+        echo "Removed leftover pre-rename install files"
     fi
     "$APP_ROOT/current/aurivon" --migrate | sed 's/^/  /'
 fi
@@ -88,17 +87,18 @@ command -v desktop-file-validate >/dev/null 2>&1 && desktop-file-validate "$DATA
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q "$DATA/applications" || true
 
 # API keys for the installed app: copy only the keys it needs (values never printed)
-if [ $INTEGRATE_ONLY -eq 0 ] && [ ! -f "$CONFIG/.env" ] && [ -n "${RMH_KEYS_FROM:-}" ] && [ -f "$RMH_KEYS_FROM" ]; then
+KEYS_FROM="${AURIVON_KEYS_FROM:-${RMH_KEYS_FROM:-}}"
+if [ $INTEGRATE_ONLY -eq 0 ] && [ ! -f "$CONFIG/.env" ] && [ -n "$KEYS_FROM" ] && [ -f "$KEYS_FROM" ]; then
     mkdir -p "$CONFIG"
     (
         umask 077
         {
             echo "# Aurivon API keys (copied by install.sh). Settings can override them."
-            grep -E '^(TMDB_API_KEY|REAL_DEBRID_API_KEY)=' "$RMH_KEYS_FROM" || true
+            grep -E '^(TMDB_API_KEY|REAL_DEBRID_API_KEY|TORBOX_API_KEY|ALLDEBRID_API_KEY)=' "$KEYS_FROM" || true
         } >"$CONFIG/.env"
     )
     chmod 600 "$CONFIG/.env"
-    echo "Copied $(grep -cE '^(TMDB_API_KEY|REAL_DEBRID_API_KEY)=' "$CONFIG/.env") API key(s) to $CONFIG/.env (0600)"
+    echo "Copied $(grep -cE '^(TMDB_API_KEY|REAL_DEBRID_API_KEY|TORBOX_API_KEY|ALLDEBRID_API_KEY)=' "$CONFIG/.env") API key(s) to $CONFIG/.env (0600)"
 fi
 [ -f "$CONFIG/config.json" ] && chmod 600 "$CONFIG/config.json" || true
 

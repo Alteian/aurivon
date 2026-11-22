@@ -322,7 +322,12 @@ impl Aurivon {
     fn ensure_window_id(&mut self) {
         // Embedding mpv (--wid) into the iced window paints over the whole UI,
         // including the playback controls, so it is opt-in only.
-        let embed = std::env::var("RMH_EMBED_PLAYER").map(|v| v == "1").unwrap_or(false);
+        let embed = matches!(
+            std::env::var("AURIVON_EMBED_PLAYER")
+                .or_else(|_| std::env::var("RMH_EMBED_PLAYER"))
+                .as_deref(),
+            Ok("1") | Ok("true") | Ok("yes")
+        );
         if embed && self.window_id.is_none() {
              #[cfg(target_os = "linux")]
              // We search for the window by title. This requires the window to be mapped.

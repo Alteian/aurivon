@@ -7,7 +7,8 @@ cd "$REPO"
 VERSION=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
 ARCH=$(uname -m)
 NAME="aurivon-$VERSION"
-[ "${RMH_SKIP_BUILD:-0}" = 1 ] || cargo build --release --bin aurivon >&2
+SKIP_BUILD="${AURIVON_SKIP_BUILD:-${RMH_SKIP_BUILD:-0}}"
+[ "$SKIP_BUILD" = 1 ] || cargo build --release --bin aurivon >&2
 BIN=target/release/aurivon
 "$BIN" --version | grep -q "$VERSION" || { echo "release binary is not $VERSION; rebuild" >&2; exit 1; }
 rm -rf "dist/$NAME"
