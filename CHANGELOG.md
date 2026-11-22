@@ -5,6 +5,8 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-23
+
 ### Added
 - Bundled Aurivon addon catalog (official + community) with one-click install; paste-any-URL remains
 - Official Trakt catalogs addon: History and Recommendations rows on Home when Trakt is connected
