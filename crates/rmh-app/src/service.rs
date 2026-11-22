@@ -248,6 +248,7 @@ impl MediaService {
     fn rebuild_scraper(&self) {
         let cfg = self.config();
         let mut sc = ScraperAddonConfig::default();
+        sc.enable_torrentio = cfg.enable_torrentio;
         if let Some(key) = cfg.real_debrid_api_key.clone().filter(|k| !k.trim().is_empty()) {
             sc = sc.with_real_debrid(key);
         }
@@ -411,7 +412,7 @@ impl MediaService {
                 .map_err(|e| format!("Stream search failed: {e}"))?;
             let mut hits: Vec<StreamHit> = results.iter().map(StreamHit::from).collect();
 
-            // Stremio-compatible installed addons
+            // Installed HTTP addons
             let (ctype, sid) = match episode {
                 Some((s, e)) => ("series".to_string(), format!("{imdb_id}:{s}:{e}")),
                 None => ("movie".to_string(), imdb_id.clone()),

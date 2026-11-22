@@ -159,7 +159,18 @@ impl MediaHubView {
             (false, _) => "Not set up: create an API app at trakt.tv/oauth/applications with redirect URI https://alteian.github.io/aurivon/oauth/trakt.html and paste its client id (no secret).".to_string(),
             (true, false) if self.trakt_waiting => "Browser opened. Approve Aurivon, then return here.".to_string(),
             (true, false) => "Client id saved. Click Connect — a browser window opens for Trakt PKCE login.".to_string(),
-            (true, true) => format!("Connected{}. Playback is scrobbled; Sync marks watched both ways.", self.trakt.username.clone().map(|u| format!(" as {u}")).unwrap_or_default()),
+            (true, true) => {
+                let mut s = format!(
+                    "Connected{}. Playback is scrobbled; watched and watchlist sync on start and every ~45 min.",
+                    self.trakt.username.clone().map(|u| format!(" as {u}")).unwrap_or_default()
+                );
+                if let Some(ts) = cfg.trakt_watched_synced_at {
+                    if let Some(dt) = chrono::DateTime::from_timestamp(ts, 0) {
+                        s.push_str(&format!(" Last watched sync {}.", dt.format("%Y-%m-%d %H:%M UTC")));
+                    }
+                }
+                s
+            }
         };
         let mut trakt_actions = div().flex().flex_wrap().gap_2();
         if self.trakt.logged_in {
@@ -323,12 +334,77 @@ impl MediaHubView {
     }
 
     fn addons_card(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let addons = self.svc.list_addons();
-        let mut list = div().flex().flex_col().gap_2();
-        for a in &addons {
+        let catalog = self.svc.addon_catalog_entries();
+        let installed = self.svc.list_addons();
+        let installed_ids: std::collections::HashSet<_> = installed.iter().map(|a| a.id.clone()).collect();
+
+        let catalog_block = |title: &str, kind: &str| {
+            let mut col = div().flex().flex_col().gap_2().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(title.to_string()));
+            for e in catalog.iter().filter(|e| e.kind == kind) {
+                let id = e.id.clone();
+                let builtin = e.builtin.clone();
+                let is_on = if let Some(b) = builtin.as_deref() {
+                    self.svc.builtin_addon_enabled(b)
+                } else {
+                    installed_ids.contains(&e.id)
+                };
+                let desc = e.description.clone();
+                col = col.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().text_sm().child(e.name.clone()))
+                                .child(div().text_xs().text_color(rgb(p.muted)).child(desc)),
+                        )
+                        .child(if builtin.is_some() {
+                            self.pill(
+                                SharedString::from(format!("cat-en-{id}")),
+                                SharedString::from(if is_on { "On" } else { "Off" }),
+                                is_on,
+                                p,
+                            )
+                            .on_click({
+                                let builtin = builtin.clone().unwrap_or_default();
+                                cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                                    let on = this.svc.builtin_addon_enabled(&builtin);
+                                    if let Err(e) = this.svc.set_builtin_addon_enabled(&builtin, !on) {
+                                        this.error = Some(e);
+                                    } else {
+                                        this.status = Some(format!("{} {}", builtin, if on { "off" } else { "on" }));
+                                    }
+                                    cx.notify();
+                                })
+                            })
+                            .into_any_element()
+                        } else if is_on {
+                            div().text_xs().text_color(rgb(p.good)).child("Installed").into_any_element()
+                        } else {
+                            self.button(SharedString::from(format!("cat-in-{id}")), "Install", true, p)
+                                .on_click({
+                                    let id = id.clone();
+                                    cx.listener(move |this, _: &ClickEvent, _w, cx| this.install_catalog_entry(id.clone(), cx))
+                                })
+                                .into_any_element()
+                        }),
+                );
+            }
+            col
+        };
+
+        let mut installed_list = div().flex().flex_col().gap_2().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Installed"));
+        if installed.is_empty() {
+            installed_list = installed_list.child(div().text_xs().text_color(rgb(p.muted)).child("No custom HTTP addons yet."));
+        }
+        for a in &installed {
             let id = a.id.clone();
             let enabled = a.enabled;
-            list = list.child(
+            installed_list = installed_list.child(
                 div()
                     .flex()
                     .items_center()
@@ -365,10 +441,13 @@ impl MediaHubView {
                     ),
             );
         }
+
         self.card(p)
-            .child(self.section_title("Stremio addons", p))
-            .child(div().text_sm().text_color(rgb(p.muted)).child("Install community addons by manifest URL. Streams are queried alongside Torrentio."))
-            .child(list)
+            .child(self.section_title("Addons", p))
+            .child(div().text_sm().text_color(rgb(p.muted)).child("Official and community addons, or paste any HTTP manifest URL."))
+            .child(catalog_block("Official", "official"))
+            .child(catalog_block("Community", "community"))
+            .child(installed_list)
             .child(
                 div()
                     .flex()

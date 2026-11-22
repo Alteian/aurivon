@@ -5,6 +5,19 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+### Added
+- Bundled Aurivon addon catalog (official + community) with one-click install; paste-any-URL remains
+- Official Trakt catalogs addon: History and Recommendations rows on Home when Trakt is connected
+- Stronger Trakt sync: auto watched + watchlist sync on start and every ~45 min; immediate history push on local mark-watched; last-synced shown in Settings
+
+### Fixed
+- Windows embed: `RegisterClassExW` ATOM handling for current `windows` crate (unblocks Windows release builds)
+
+### Changed
+- Home drops the layout pill strip and duplicate search field; layout stays in Settings → Appearance (Ctrl+L), search in the page top bar / nav / Ctrl+K
+- Addons rebranded away from Stremio naming; HTTP addon protocol unchanged (Torrentio-style hosts still work)
+- Built-in Torrentio can be toggled; installing a remote Torrentio URL disables the built-in scraper to avoid double queries
+
 ## [0.8.1] - 2026-11-23
 
 ### Fixed

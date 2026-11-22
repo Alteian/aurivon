@@ -509,6 +509,47 @@ impl TraktClient {
         self.get(&format!("/sync/history?limit={limit}")).await
     }
 
+    /// Personalized recommendations (movies + shows), as Entry-shaped items.
+    pub async fn recommendations(&self, limit: u32) -> Result<Vec<Entry>> {
+        #[derive(Deserialize)]
+        struct RecMovie {
+            movie: MediaRef,
+        }
+        #[derive(Deserialize)]
+        struct RecShow {
+            show: MediaRef,
+        }
+        let lim = limit.clamp(1, 100);
+        let movies: Vec<RecMovie> = self.get(&format!("/recommendations/movies?limit={lim}")).await.unwrap_or_default();
+        let shows: Vec<RecShow> = self.get(&format!("/recommendations/shows?limit={lim}")).await.unwrap_or_default();
+        let mut out = Vec::with_capacity(movies.len() + shows.len());
+        for m in movies {
+            out.push(Entry {
+                kind: "movie".into(),
+                movie: Some(m.movie),
+                show: None,
+                episode: None,
+                progress: None,
+                listed_at: None,
+                watched_at: None,
+                paused_at: None,
+            });
+        }
+        for s in shows {
+            out.push(Entry {
+                kind: "show".into(),
+                movie: None,
+                show: Some(s.show),
+                episode: None,
+                progress: None,
+                listed_at: None,
+                watched_at: None,
+                paused_at: None,
+            });
+        }
+        Ok(out)
+    }
+
     pub async fn watched(&self) -> Result<Watched> {
         #[derive(Deserialize)]
         struct WMovie {

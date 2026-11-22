@@ -119,13 +119,15 @@ mod platform {
     const CLASS: &str = "AurivonVideoHost";
 
     unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        match msg {
-            WM_ERASEBKGND => LRESULT(1),
-            WM_PAINT => {
-                let _ = windows::Win32::Graphics::Gdi::ValidateRect(hwnd, None);
-                LRESULT(0)
+        unsafe {
+            match msg {
+                WM_ERASEBKGND => LRESULT(1),
+                WM_PAINT => {
+                    let _ = windows::Win32::Graphics::Gdi::ValidateRect(hwnd, None);
+                    LRESULT(0)
+                }
+                _ => DefWindowProcW(hwnd, msg, wparam, lparam),
             }
-            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
     }
 
@@ -144,7 +146,8 @@ mod platform {
                 ..Default::default()
             };
             unsafe {
-                OK = RegisterClassExW(&wc).0 != 0;
+                // ATOM is a u16 alias in recent `windows` crates
+                OK = RegisterClassExW(&wc) != 0;
                 if !OK {
                     warn!("RegisterClassExW for video host failed");
                 }

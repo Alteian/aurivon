@@ -1,6 +1,6 @@
 //! Torrent streaming engine for Aurivon
 //!
-//! This crate provides Stremio-like torrent streaming capabilities:
+//! This crate provides torrent streaming capabilities:
 //! - Sequential piece downloading for instant playback
 //! - Built-in HTTP server for MPV to stream from
 //! - Magnet link and .torrent file support

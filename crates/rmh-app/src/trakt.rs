@@ -25,11 +25,13 @@ pub struct SyncReport {
     pub pushed: usize,
 }
 
-/// Watchlist + continue-watching from Trakt
+/// Watchlist + continue-watching + catalogs from Trakt
 #[derive(Debug, Clone, Default)]
 pub struct TraktLists {
     pub watchlist: Vec<Entry>,
     pub playback: Vec<Entry>,
+    pub history: Vec<Entry>,
+    pub recommendations: Vec<Entry>,
 }
 
 impl MediaService {
@@ -92,8 +94,23 @@ impl MediaService {
         });
     }
 
+    /// Push a single watched item to Trakt history immediately (mark-watched path).
+    pub fn trakt_push_watched(&self, item: Item) {
+        let Ok(client) = self.trakt_client() else { return };
+        self.inner.rt.spawn(async move {
+            if !client.is_logged_in().await {
+                return;
+            }
+            match client.add_to_history(&[item]).await {
+                Ok(()) => info!("Trakt history push ok"),
+                Err(e) => warn!("Trakt history push failed: {e:#}"),
+            }
+        });
+    }
+
     pub fn trakt_lists(&self) -> impl Future<Output = ServiceResult<TraktLists>> + 'static {
         let client = self.trakt_client();
+        let catalogs = self.config().enable_trakt_catalogs;
         self.run(async move {
             let c = client?;
             if !c.is_logged_in().await {
@@ -101,7 +118,15 @@ impl MediaService {
             }
             let watchlist = c.watchlist().await.map_err(|e| format!("{e:#}"))?;
             let playback = c.playback().await.map_err(|e| format!("{e:#}"))?;
-            Ok(TraktLists { watchlist, playback })
+            let (history, recommendations) = if catalogs {
+                (
+                    c.history(40).await.unwrap_or_default(),
+                    c.recommendations(20).await.unwrap_or_default(),
+                )
+            } else {
+                (vec![], vec![])
+            };
+            Ok(TraktLists { watchlist, playback, history, recommendations })
         })
     }
 
@@ -134,6 +159,7 @@ impl MediaService {
         let client = self.trakt_client();
         let entries = self.library_entries();
         let db = self.db();
+        let svc = self.clone();
         self.run(async move {
             let c = client?;
             if !c.is_logged_in().await {
@@ -167,6 +193,9 @@ impl MediaService {
                 }
                 report.pushed = push.len();
             }
+            let mut cfg = svc.config();
+            cfg.trakt_watched_synced_at = Some(chrono::Utc::now().timestamp());
+            let _ = svc.save_config(cfg);
             info!("Trakt sync: pulled {}, pushed {}", report.pulled, report.pushed);
             Ok(report)
         })

@@ -1,0 +1,36 @@
+{
+  "entries": [
+    {
+      "id": "org.aurivon.trakt-catalogs",
+      "name": "Trakt catalogs",
+      "description": "History, watchlist and recommendations from your Trakt account (requires Trakt login).",
+      "kind": "official",
+      "builtin": "trakt-catalogs",
+      "resources": ["catalog"]
+    },
+    {
+      "id": "org.aurivon.torrentio",
+      "name": "Torrentio",
+      "description": "Built-in torrent aggregator used for stream search.",
+      "kind": "community",
+      "builtin": "torrentio",
+      "resources": ["stream"]
+    },
+    {
+      "id": "com.linvo.cinemeta",
+      "name": "Cinemeta",
+      "description": "Community metadata catalogs (movies and series).",
+      "kind": "community",
+      "manifest_url": "https://v3-cinemeta.strem.io/manifest.json",
+      "resources": ["catalog", "meta"]
+    },
+    {
+      "id": "community.torrentio.remote",
+      "name": "Torrentio (remote)",
+      "description": "HTTP Torrentio addon. Prefer the built-in Torrentio above unless you need a custom instance.",
+      "kind": "community",
+      "manifest_url": "https://torrentio.strem.fun/manifest.json",
+      "resources": ["stream"]
+    }
+  ]
+}

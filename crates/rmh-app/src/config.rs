@@ -153,9 +153,15 @@ pub struct AppConfig {
     /// Navigation: "expanded" | "rail" | "top"
     #[serde(default = "default_nav_style")]
     pub nav_style: String,
-    /// Installed Stremio-compatible addon base URLs (…/manifest.json resolved)
+    /// Installed HTTP addon base URLs (…/manifest.json resolved)
     #[serde(default)]
     pub addons: Vec<InstalledAddon>,
+    /// Built-in Torrentio stream scraper (disable if you use a remote Torrentio addon)
+    #[serde(default = "yes")]
+    pub enable_torrentio: bool,
+    /// Official Trakt catalogs addon (history / watchlist / recommendations rows)
+    #[serde(default = "yes")]
+    pub enable_trakt_catalogs: bool,
     /// TorBox API key (optional second debrid)
     #[serde(default)]
     pub torbox_api_key: Option<String>,
@@ -400,6 +406,8 @@ impl Default for AppConfig {
             card_size: default_card_size(),
             nav_style: default_nav_style(),
             addons: vec![],
+            enable_torrentio: true,
+            enable_trakt_catalogs: true,
             torbox_api_key: std::env::var("TORBOX_API_KEY").ok(),
             alldebrid_api_key: std::env::var("ALLDEBRID_API_KEY").ok(),
             prefer_debrid_on_disk_pressure: true,

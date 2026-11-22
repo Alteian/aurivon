@@ -1,6 +1,6 @@
 [package]
 name = "rmh-addon"
-description = "Addon/Plugin system for Aurivon - Stremio-compatible"
+description = "Addon/Plugin system for Aurivon (HTTP addon protocol)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

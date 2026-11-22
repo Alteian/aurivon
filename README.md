@@ -1,11 +1,11 @@
 # Aurivon
 
-A lightweight, high-performance media center application built entirely in Rust. Designed as a modern, extensible alternative to Stremio and Kodi.
+A lightweight, high-performance media center application built entirely in Rust. Designed as a modern, extensible alternative to Kodi-style media centers.
 
 ## Features
 
 - 🎬 **Native GPU-accelerated UI** - GPUI (the Zed UI framework), GPU-rendered
-- 🔌 **Extensible Addon System** - Stremio-compatible plugin architecture
+- 🔌 **Extensible Addon System** - HTTP addon protocol (manifest, catalogs, streams)
 - 📂 **Library Management** - Scan directories for video and audio files
 - ⏯️ **In-app playback controls** - Play/pause, seek, ±10s, volume, stop, resume where you left off
 - 🎯 **Metadata Fetching** - Automatic metadata from TMDB (The Movie Database)
@@ -31,7 +31,7 @@ aurivon/
 │   ├── rmh-scanner/       # Recursive directory scanner
 │   ├── rmh-metadata/      # TMDB API client
 │   ├── rmh-player/        # UI-agnostic mpv player (JSON IPC)
-│   ├── rmh-addon/         # Stremio-compatible addon system
+│   ├── rmh-addon/         # HTTP addon system
 │   ├── rmh-torrent/       # Torrent streaming engine
 │   ├── rmh-scraper/       # Stream scrapers / Real-Debrid
 │   └── rmh-ui/            # Iced GUI components
@@ -50,7 +50,7 @@ front end (e.g. GPUI) can be dropped in by replacing `rmh-ui`.
 
 ## Addon System
 
-Aurivon features a Stremio-compatible addon architecture for extensibility:
+Aurivon features an HTTP addon architecture for extensibility:
 
 ### Addon Types
 
@@ -382,7 +382,7 @@ The scanner recognizes these extensions (mpv plays almost anything):
 | `rmh-scanner` | Async directory traversal using `walkdir` |
 | `rmh-metadata` | TMDB API client with `reqwest` |
 | `rmh-player` | UI-agnostic mpv controller over JSON IPC (play/pause/seek/volume/stop, state snapshot) |
-| `rmh-addon` | Stremio-compatible addon system (catalogs, streams, metadata, subtitles) |
+| `rmh-addon` | HTTP addon system (catalogs, streams, metadata, subtitles) |
 | `rmh-ui` | Iced application, views, components |
 
 ### Running Tests

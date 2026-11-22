@@ -25,23 +25,11 @@ impl MediaHubView {
         v
     }
 
-    pub(crate) fn layout_switcher(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let current = self.svc.config().home_layout;
-        let mut row = div().flex().items_center().gap_2().child(div().text_xs().text_color(rgb(p.muted)).child("Home layout"));
-        for l in HomeLayout::ALL {
-            let letter = l.letter();
-            row = row.child(
-                self.pill(SharedString::from(format!("layout-{letter}")), l.label(), l == current, p)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.set_home_layout(l, cx))),
-            );
-        }
-        row
-    }
-
     pub(crate) fn home_page(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
         let layout = self.svc.config().home_layout;
+        // Layout is chosen in Settings → Appearance (Ctrl+L still cycles).
         if layout.is_feed() {
-            return div().flex().flex_col().gap_6().child(self.home_quick_bar(p, cx)).child(self.home_stream(p, cx)).into_any_element();
+            return self.home_stream(p, cx);
         }
         let body = match layout {
             HomeLayout::Stream | HomeLayout::Cinematic | HomeLayout::Compact => self.home_stream(p, cx),
@@ -50,7 +38,7 @@ impl MediaHubView {
             HomeLayout::Library => self.home_library(p, cx),
         };
         let cfg = self.svc.config();
-        let mut col = div().flex().flex_col().gap_6().child(self.layout_switcher(p, cx)).child(body);
+        let mut col = div().flex().flex_col().gap_6().child(body);
         if cfg.home_row_visible("watchlist") && !self.disc.watch_cards.is_empty() {
             let cards = self.disc.watch_cards.iter().map(|c| self.title_card(c, "home-wl", 150.0, p, cx)).collect();
             col = col.child(self.section("Your watchlist", Some(format!("{} titles · synced with Trakt", self.disc.watch_cards.len())), self.row("home-wl", cards), p));

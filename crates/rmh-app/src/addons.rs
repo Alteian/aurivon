@@ -1,9 +1,10 @@
-//! Installable Stremio-compatible HTTP addons (manifest + catalog + stream).
+//! Installable HTTP addons (manifest + catalog + stream) and the bundled catalog.
 
 use crate::config::InstalledAddon;
 use crate::service::{MediaService, ServiceResult};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::future::Future;
+use std::sync::OnceLock;
 use tracing::info;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -71,6 +72,39 @@ pub struct RemoteMeta {
     pub releaseInfo: Option<String>,
 }
 
+/// Entry in the shipped Aurivon addon catalog (`data/addon_catalog.json`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogEntry {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// `official` or `community`
+    pub kind: String,
+    #[serde(default)]
+    pub manifest_url: Option<String>,
+    /// Built-in feature key: `trakt-catalogs`, `torrentio`, …
+    #[serde(default)]
+    pub builtin: Option<String>,
+    #[serde(default)]
+    pub resources: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CatalogFile {
+    entries: Vec<CatalogEntry>,
+}
+
+fn bundled_catalog() -> &'static [CatalogEntry] {
+    static CAT: OnceLock<Vec<CatalogEntry>> = OnceLock::new();
+    CAT.get_or_init(|| {
+        let raw = include_str!("../data/addon_catalog.json");
+        serde_json::from_str::<CatalogFile>(raw)
+            .map(|f| f.entries)
+            .unwrap_or_default()
+    })
+}
+
 fn normalize_base(url: &str) -> String {
     let u = url.trim().trim_end_matches('/');
     if u.ends_with("/manifest.json") {
@@ -80,9 +114,37 @@ fn normalize_base(url: &str) -> String {
     }
 }
 
+fn looks_like_torrentio(url: &str) -> bool {
+    let u = url.to_ascii_lowercase();
+    u.contains("torrentio.strem.fun") || u.contains("torrentio.")
+}
+
 impl MediaService {
+    pub fn addon_catalog_entries(&self) -> Vec<CatalogEntry> {
+        bundled_catalog().to_vec()
+    }
+
     pub fn list_addons(&self) -> Vec<InstalledAddon> {
         self.config().addons
+    }
+
+    pub fn builtin_addon_enabled(&self, builtin: &str) -> bool {
+        let cfg = self.config();
+        match builtin {
+            "torrentio" => cfg.enable_torrentio,
+            "trakt-catalogs" => cfg.enable_trakt_catalogs,
+            _ => false,
+        }
+    }
+
+    pub fn set_builtin_addon_enabled(&self, builtin: &str, enabled: bool) -> ServiceResult<()> {
+        let mut cfg = self.config();
+        match builtin {
+            "torrentio" => cfg.enable_torrentio = enabled,
+            "trakt-catalogs" => cfg.enable_trakt_catalogs = enabled,
+            _ => return Err(format!("Unknown built-in addon: {builtin}")),
+        }
+        self.save_config(cfg)
     }
 
     pub fn install_addon(&self, url: String) -> impl Future<Output = ServiceResult<InstalledAddon>> + 'static {
@@ -102,7 +164,7 @@ impl MediaService {
                 .await
                 .map_err(|e| format!("Invalid addon manifest: {e}"))?;
             let installed = InstalledAddon {
-                url: base,
+                url: base.clone(),
                 id: m.id.clone(),
                 name: m.name.clone(),
                 enabled: true,
@@ -110,9 +172,32 @@ impl MediaService {
             let mut cfg = svc.config();
             cfg.addons.retain(|a| a.id != installed.id);
             cfg.addons.push(installed.clone());
+            // Avoid double-querying Torrentio: prefer the remote instance
+            if looks_like_torrentio(&base) {
+                cfg.enable_torrentio = false;
+            }
             svc.save_config(cfg)?;
             info!("Installed addon {} ({})", installed.name, installed.id);
             Ok(installed)
+        })
+    }
+
+    pub fn install_catalog_entry(&self, entry_id: String) -> impl Future<Output = ServiceResult<InstalledAddon>> + 'static {
+        let entry = bundled_catalog().iter().find(|e| e.id == entry_id).cloned();
+        let svc = self.clone();
+        self.run(async move {
+            let entry = entry.ok_or_else(|| "Catalog entry not found".to_string())?;
+            if let Some(builtin) = entry.builtin.as_deref() {
+                svc.set_builtin_addon_enabled(builtin, true)?;
+                return Ok(InstalledAddon {
+                    url: format!("builtin:{builtin}"),
+                    id: entry.id,
+                    name: entry.name,
+                    enabled: true,
+                });
+            }
+            let url = entry.manifest_url.ok_or_else(|| "Catalog entry has no manifest URL".to_string())?;
+            svc.install_addon(url).await
         })
     }
 
@@ -158,7 +243,7 @@ impl MediaService {
         })
     }
 
-    /// Streams from every enabled remote addon for an IMDB / Stremio id
+    /// Streams from every enabled remote addon for an IMDB content id
     pub fn addon_streams(
         &self,
         content_type: String,
@@ -168,7 +253,7 @@ impl MediaService {
         let addons = self.config().addons;
         self.run(async move {
             let mut out = vec![];
-            for a in addons.into_iter().filter(|a| a.enabled) {
+            for a in addons.into_iter().filter(|a| a.enabled && !a.url.starts_with("builtin:")) {
                 let url = format!("{}/stream/{}/{}.json", a.url.trim_end_matches('/'), content_type, id);
                 match http.get(&url).send().await {
                     Ok(resp) if resp.status().is_success() => {

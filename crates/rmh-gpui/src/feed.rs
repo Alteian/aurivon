@@ -424,6 +424,18 @@ impl MediaHubView {
             }
         }
 
+        // Official Trakt catalogs addon rows
+        if self.trakt.logged_in && cfg.enable_trakt_catalogs {
+            if !self.trakt_history_cards.is_empty() {
+                let items = self.trakt_history_cards.iter().map(|c| self.feed_card(c, "s-th", Some("Watched on Trakt"), &prog, p, cx)).collect();
+                col = col.child(self.feed_section("s-th", "Trakt history", Some("recently watched".into()), None, items, p, cx));
+            }
+            if !self.trakt_rec_cards.is_empty() {
+                let items = self.trakt_rec_cards.iter().map(|c| self.feed_card(c, "s-tr", None, &prog, p, cx)).collect();
+                col = col.child(self.feed_section("s-tr", "Trakt recommendations", Some("based on your history".into()), None, items, p, cx));
+            }
+        }
+
         if !self.svc.has_tmdb() {
             col = col.child(
                 self.card(p)
@@ -855,39 +867,6 @@ impl MediaHubView {
             .into_any_element()
     }
 
-    /// Search entry + layout switcher above the hero
-    pub(crate) fn home_quick_bar(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .flex()
-            .items_center()
-            .gap_4()
-            .child(
-                div()
-                    .id("home-search")
-                    .flex_1()
-                    .max_w(px(560.0))
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .px_4()
-                    .py(px(10.0))
-                    .rounded_full()
-                    .cursor_pointer()
-                    .bg(rgb(p.surface))
-                    .border_1()
-                    .border_color(rgb(p.border_soft))
-                    .text_sm()
-                    .text_color(rgb(p.muted))
-                    .hover(|s| s.border_color(rgb(p.accent)))
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_search(window, cx)))
-                    .child(div().text_color(rgb(p.accent)).child("⌕"))
-                    .child(div().flex_1().child("Search movies, series, people…"))
-                    .child(div().text_xs().text_color(rgb(p.faint)).child("/  or  Ctrl K")),
-            )
-            .child(div().flex_1())
-            .child(self.layout_switcher(p, cx))
-            .into_any_element()
-    }
 }
 
 fn skeleton_card(d: CardDims, p: Palette) -> AnyElement {

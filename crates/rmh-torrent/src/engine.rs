@@ -1,6 +1,6 @@
 //! Torrent streaming engine using librqbit
 //!
-//! Provides Stremio-like sequential downloading for instant video playback.
+//! Provides sequential downloading for instant video playback.
 
 use crate::error::{TorrentError, TorrentResult};
 use crate::server::{StreamServer, StreamableFile};

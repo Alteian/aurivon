@@ -1,6 +1,6 @@
 //! Torrentio scraper
 //!
-//! Torrentio is a popular Stremio addon that aggregates torrents from multiple sources.
+//! Torrentio aggregates torrents from multiple sources.
 //! We can use their API to get torrents for movies and shows.
 //!
 //! This is one of the most reliable sources as it's actively maintained.
@@ -80,7 +80,7 @@ impl TorrentioConfig {
     }
 }
 
-/// Torrentio scraper using their Stremio addon API
+/// Torrentio scraper using their HTTP addon API
 pub struct TorrentioScraper {
     client: Client,
     config: TorrentioConfig,

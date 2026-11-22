@@ -1,4 +1,4 @@
-//! Addon manifest definitions - compatible with Stremio addon protocol
+//! Addon manifest definitions - HTTP addon protocol (manifest + catalog + stream)
 
 use serde::{Deserialize, Serialize};
 use semver::Version;

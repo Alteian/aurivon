@@ -38,7 +38,7 @@ pub use social::{ServiceStatus, SimklPin, WatchEvent};
 pub use subs::{SubContext, SubtitleHit};
 pub use watchlist::{WatchItem, WatchlistSyncReport};
 pub use intro::IntroSegments;
-pub use addons::{RemoteMeta, RemoteStream};
+pub use addons::{CatalogEntry, RemoteMeta, RemoteStream};
 pub use rmh_services::opensubtitles::language_name as language_label;
 pub use rmh_services::simkl::Scrobble as SocialScrobble;
 pub use service::{expand_home, is_audio, MediaService, MovieHit, ResolvedStream, ServiceResult, StreamHit};

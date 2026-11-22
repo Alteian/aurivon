@@ -203,6 +203,12 @@ pub struct MediaHubView {
     pub(crate) trakt_waiting: bool,
     pub(crate) trakt_lists: TraktLists,
     pub(crate) trakt_cards: Vec<TitleCard>,
+    pub(crate) trakt_history_cards: Vec<TitleCard>,
+    pub(crate) trakt_rec_cards: Vec<TitleCard>,
+    /// Quiet background sync in flight
+    trakt_syncing: bool,
+    /// Last successful background / full sync start
+    trakt_sync_at: Option<Instant>,
 
     // playback
     pub(crate) now: Option<NowPlaying>,
@@ -351,6 +357,10 @@ impl MediaHubView {
             trakt_waiting: false,
             trakt_lists: TraktLists::default(),
             trakt_cards: Vec::new(),
+            trakt_history_cards: Vec::new(),
+            trakt_rec_cards: Vec::new(),
+            trakt_syncing: false,
+            trakt_sync_at: None,
             now: None,
             snap: PlaybackSnapshot::default(),
             now_entry: None,
@@ -686,10 +696,18 @@ impl MediaHubView {
 
     fn save_progress(&mut self, update: Option<ProgressUpdate>, cx: &mut Context<Self>) {
         let Some(update) = update else { return };
+        let push_item = if update.watched {
+            self.entries.iter().find(|e| e.item.id == update.media_id).and_then(|e| e.trakt_item())
+        } else {
+            None
+        };
         if let Some(e) = self.entries.iter_mut().find(|e| e.item.id == update.media_id) {
             e.item.watch_progress = update.position;
             e.item.watched |= update.watched;
             e.item.updated_at = chrono_now();
+        }
+        if let Some(item) = push_item {
+            self.svc.trakt_push_watched(item);
         }
         let fut = self.svc.save_progress(update);
         cx.spawn(async move |_, _| {
@@ -827,6 +845,25 @@ impl MediaHubView {
         self.busy = Some("Installing addon…".into());
         cx.notify();
         let fut = self.svc.install_addon(url);
+        cx.spawn(async move |this, cx| {
+            let res = fut.await;
+            this.update(cx, |this, cx| {
+                this.busy = None;
+                match res {
+                    Ok(a) => this.status = Some(format!("Installed {}", a.name)),
+                    Err(e) => this.error = Some(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn install_catalog_entry(&mut self, entry_id: String, cx: &mut Context<Self>) {
+        self.busy = Some("Installing addon…".into());
+        cx.notify();
+        let fut = self.svc.install_catalog_entry(entry_id);
         cx.spawn(async move |this, cx| {
             let res = fut.await;
             this.update(cx, |this, cx| {
@@ -1205,6 +1242,7 @@ impl MediaHubView {
     pub(crate) fn on_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pump_feed(cx);
         self.pump_images(cx);
+        self.maybe_trakt_background_sync(cx);
         if std::mem::take(&mut self.autoplay_ready) {
             self.pending_play = None;
             if self.page == Page::Details && !self.streams.is_empty() {
@@ -1681,6 +1719,7 @@ impl MediaHubView {
                     this.trakt = s;
                     if logged {
                         this.load_trakt_lists(cx);
+                        this.maybe_trakt_background_sync(cx);
                     }
                 }
                 cx.notify();
@@ -1695,20 +1734,73 @@ impl MediaHubView {
         let svc = self.svc.clone();
         cx.spawn(async move |this, cx| {
             let Ok(lists) = fut.await else { return };
-            let ids: Vec<(TitleKind, i32)> = lists
-                .playback
-                .iter()
-                .chain(lists.watchlist.iter())
-                .filter_map(|e| {
-                    let kind = if e.movie.is_some() { TitleKind::Movie } else { TitleKind::Tv };
-                    Some((kind, e.tmdb_id()? as i32))
-                })
-                .take(24)
-                .collect();
-            let cards = if svc.has_tmdb() { svc.cards_for(ids).await.unwrap_or_default() } else { vec![] };
+            let map_ids = |entries: &[rmh_app::TraktEntry], n: usize| -> Vec<(TitleKind, i32)> {
+                entries
+                    .iter()
+                    .filter_map(|e| {
+                        let kind = if e.movie.is_some() { TitleKind::Movie } else { TitleKind::Tv };
+                        Some((kind, e.tmdb_id()? as i32))
+                    })
+                    .take(n)
+                    .collect()
+            };
+            let playback_wl: Vec<_> = lists.playback.iter().chain(lists.watchlist.iter()).cloned().collect();
+            let cards = if svc.has_tmdb() {
+                svc.cards_for(map_ids(&playback_wl, 24)).await.unwrap_or_default()
+            } else {
+                vec![]
+            };
+            let history = if svc.has_tmdb() {
+                svc.cards_for(map_ids(&lists.history, 20)).await.unwrap_or_default()
+            } else {
+                vec![]
+            };
+            let recs = if svc.has_tmdb() {
+                svc.cards_for(map_ids(&lists.recommendations, 20)).await.unwrap_or_default()
+            } else {
+                vec![]
+            };
             this.update(cx, |this, cx| {
                 this.trakt_lists = lists;
                 this.trakt_cards = cards;
+                this.trakt_history_cards = history;
+                this.trakt_rec_cards = recs;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Startup + quiet interval sync (watched + watchlist). Skips if already running.
+    fn maybe_trakt_background_sync(&mut self, cx: &mut Context<Self>) {
+        if self.trakt_syncing || !self.trakt.logged_in {
+            return;
+        }
+        let low = self.svc.config().low_power;
+        let interval = Duration::from_secs(if low { 2 * 3600 } else { 45 * 60 });
+        let due = match self.trakt_sync_at {
+            None => true,
+            Some(t) => t.elapsed() >= interval,
+        };
+        if !due {
+            return;
+        }
+        self.trakt_sync_quiet(cx);
+    }
+
+    fn trakt_sync_quiet(&mut self, cx: &mut Context<Self>) {
+        self.trakt_syncing = true;
+        self.trakt_sync_at = Some(Instant::now());
+        let watched = self.svc.trakt_sync();
+        let watchlist = self.svc.sync_watchlist();
+        cx.spawn(async move |this, cx| {
+            let _ = watched.await;
+            let _ = watchlist.await;
+            this.update(cx, |this, cx| {
+                this.trakt_syncing = false;
+                this.load_trakt_lists(cx);
+                this.load_watchlist(cx);
                 cx.notify();
             })
             .ok();
@@ -1760,6 +1852,9 @@ impl MediaHubView {
             this.update(cx, |this, cx| {
                 this.trakt_lists = TraktLists::default();
                 this.trakt_cards.clear();
+                this.trakt_history_cards.clear();
+                this.trakt_rec_cards.clear();
+                this.trakt_sync_at = None;
                 this.status = Some("Disconnected from Trakt".into());
                 this.refresh_trakt(cx);
             })
