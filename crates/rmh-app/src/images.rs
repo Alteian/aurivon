@@ -30,6 +30,22 @@ pub fn poster_url(t: &Title) -> Option<String> {
     t.poster_url(PosterSize::W342)
 }
 
+/// Poster for Home rows (cards ~150 px wide)
+pub fn row_poster_url(t: &Title) -> Option<String> {
+    t.poster_url(PosterSize::W185)
+}
+
+/// Backdrop for landscape row cards (W300, W780 for large cards)
+pub fn row_backdrop_url(t: &Title, large: bool) -> Option<String> {
+    let size = if large { rmh_metadata::BackdropSize::W780 } else { rmh_metadata::BackdropSize::W300 };
+    t.backdrop_path.as_deref().map(|b| rmh_metadata::TmdbClient::backdrop_url(b, size))
+}
+
+/// Backdrop for the Home hero carousel
+pub fn hero_backdrop_url(t: &Title) -> Option<String> {
+    t.backdrop_path.as_deref().map(|b| rmh_metadata::TmdbClient::backdrop_url(b, rmh_metadata::BackdropSize::W1280))
+}
+
 /// Small poster for list rows (calendar, credits, search list)
 pub fn thumb_url(t: &Title) -> Option<String> {
     t.poster_url(PosterSize::W154)

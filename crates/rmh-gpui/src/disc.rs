@@ -117,6 +117,8 @@ pub struct BrowseState {
     pub genre_rows: Vec<(i32, String, Vec<TitleCard>)>,
     pub rows_kind: Option<TitleKind>,
     pub query: DiscoverQuery,
+    /// "See all" of a curated list (trending, popular, …) instead of /discover
+    pub list: Option<ListKind>,
     pub results: Vec<TitleCard>,
     pub page: u32,
     pub total_pages: u32,
@@ -132,7 +134,7 @@ pub struct BrowseState {
 
 impl BrowseState {
     pub fn filtered(&self) -> bool {
-        self.query.is_filtered() || self.query.sort != BrowseSort::Popularity
+        self.list.is_some() || self.query.is_filtered() || self.query.sort != BrowseSort::Popularity
     }
 }
 
@@ -264,6 +266,7 @@ impl Disc {
                 genre_rows: vec![],
                 rows_kind: None,
                 query: DiscoverQuery { kind: kind_default, region: cfg.region.clone(), ..Default::default() },
+                list: None,
                 results: vec![],
                 page: 0,
                 total_pages: 0,
@@ -568,7 +571,11 @@ impl MediaHubView {
             b.sel = None;
         }
         b.loading = true;
-        let fut = self.svc.browse_discover(q);
+        let list = b.list;
+        let fut: std::pin::Pin<Box<dyn std::future::Future<Output = Result<rmh_app::BrowseResults, String>>>> = match list {
+            Some(l) => Box::pin(self.svc.browse_list(q.kind, l, q.page)),
+            None => Box::pin(self.svc.browse_discover(q)),
+        };
         cx.spawn(async move |this, cx| {
             let res = fut.await;
             this.update(cx, |this, cx| {
@@ -671,6 +678,7 @@ impl MediaHubView {
                 }
             }
         }
+        self.disc.browse.list = None;
         self.run_discover(false, cx);
     }
 
@@ -686,12 +694,14 @@ impl MediaHubView {
 
     pub(crate) fn set_sort(&mut self, s: BrowseSort, cx: &mut Context<Self>) {
         self.disc.browse.query.sort = s;
+        self.disc.browse.list = None;
         self.run_discover(false, cx);
     }
 
     pub(crate) fn clear_filters(&mut self, cx: &mut Context<Self>) {
         let b = &mut self.disc.browse;
         b.query = DiscoverQuery { kind: b.kind, region: b.query.region.clone(), ..Default::default() };
+        b.list = None;
         b.panel = None;
         self.run_discover(false, cx);
     }
@@ -701,8 +711,41 @@ impl MediaHubView {
         self.set_browse_kind(kind, cx);
         let b = &mut self.disc.browse;
         b.query.genres = vec![genre];
+        b.list = None;
         self.navigate(Page::Discover, window, cx);
         self.run_discover(false, cx);
+    }
+
+    /// Browse grid of a whole curated list ("See all" on Home)
+    pub(crate) fn browse_list_all(&mut self, kind: TitleKind, list: ListKind, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_browse_kind(kind, cx);
+        let b = &mut self.disc.browse;
+        b.query = DiscoverQuery { kind, region: b.query.region.clone(), ..Default::default() };
+        b.list = Some(list);
+        b.panel = None;
+        self.navigate(Page::Discover, window, cx);
+        self.run_discover(false, cx);
+    }
+
+    /// Browse grid for a /discover query ("See all" on a Home genre row)
+    pub(crate) fn browse_query_all(&mut self, q: DiscoverQuery, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_browse_kind(q.kind, cx);
+        let b = &mut self.disc.browse;
+        let region = b.query.region.clone();
+        b.query = DiscoverQuery { region, ..q };
+        b.list = None;
+        b.panel = None;
+        self.navigate(Page::Discover, window, cx);
+        self.run_discover(false, cx);
+    }
+
+    /// Movies / Series in the sidebar: the Browse home for that kind
+    pub(crate) fn browse_kind_home(&mut self, kind: TitleKind, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_browse_kind(kind, cx);
+        if self.disc.browse.list.take().is_some() {
+            self.run_discover(false, cx);
+        }
+        self.navigate(Page::Discover, window, cx);
     }
 
     /// Arrow keys / Enter / W on the Browse page. Returns true when handled.

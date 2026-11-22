@@ -5,6 +5,23 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-22
+
+### Added
+- Streaming-first Home (new default): auto-rotating hero carousel of what's trending (backdrop, rating, overview, ▶ Play best / + Watchlist / Details, ‹ › and ←/→), Continue watching (local + Trakt), Up next, New episodes this week, Trending today / this week, Because you watched…, Popular movies / series, New on streaming, Now in theaters, Top rated, genre rows, Watchlist; the local library is a small row at the bottom (hidden when empty)
+- Rows load only when scrolled into view; small W185 posters; cards grow on hover and show rating / watched / progress; ‹ › row arrows and "See all" into a Browse grid of the whole list
+- New logo (gold lyre + play + aurora) with wordmark, regenerated hicolor icons and an embedded in-app mark; BRANDING.md
+- Brand system: design tokens (radii, spacing, type, elevation, motion) and six live-switchable themes — Aurum (default), Midnight, OLED Black, Aurora, Light, Violet (classic) — plus an accent picker and "follow system light / dark"
+- Settings → Appearance: theme, accent, Home layout (Streaming, Cinematic, Compact, Continue & Up Next, Discover, Library), poster or landscape cards in three sizes, and sidebar / icon rail / top bar navigation, all applied instantly
+
+### Changed
+- Sidebar: Home, Search, Movies, Series, Calendar, Watchlist, Library, Settings; Ctrl+1–8 follow that order
+- TMDB list / trending / recommendation responses are cached for 6 h (was 4 h)
+- Existing installs switch to the new Home once; any later layout choice sticks
+
+### Fixed
+- Restored migration 001 byte-for-byte (a comment edit in 0.6.0 made existing databases fail with "migration 1 was previously applied but has been modified")
+
 ## [0.7.1] - 2026-11-23
 
 ### Fixed

@@ -3,7 +3,7 @@
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use rmh_app::{HomeLayout, VideoMode};
+use rmh_app::VideoMode;
 
 use crate::theme::Palette;
 use crate::view::MediaHubView;
@@ -99,16 +99,6 @@ impl MediaHubView {
                             .text_color(rgb(p.danger))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.remove_library(id, cx))),
                     ),
-            );
-        }
-
-        // Home layout
-        let mut layouts = div().flex().flex_wrap().gap_2();
-        for (i, l) in HomeLayout::ALL.into_iter().enumerate() {
-            let letter = ["A", "B", "C"][i];
-            layouts = layouts.child(
-                self.pill(SharedString::from(format!("set-layout-{letter}")), format!("{letter} · {}", l.label()), cfg.home_layout == l, p)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.set_home_layout(l, cx))),
             );
         }
 
@@ -244,7 +234,7 @@ impl MediaHubView {
                 if self.svc.has_real_debrid() { "Real-Debrid: configured" } else { "Real-Debrid: not configured (P2P only)" }.into(),
             ))
             .child(div().text_xs().text_color(rgb(p.faint)).child(
-                "Keys: Ctrl+K or / search · Space/K play · ←/→ 10 s (Shift 60 s) · ↑/↓ volume · ,/. frame · [/] speed · PgUp/PgDn next/prev chapter · I skip intro · A audio · J subtitles · O OpenSubtitles · T panel tab · N next episode · F fullscreen (player) · F11 fullscreen (anywhere) · M mute · S stop · Enter resume · Ctrl+1–7 pages · Ctrl+L home layout · Ctrl+I details",
+                "Keys: Ctrl+K or / search · Space/K play · ←/→ 10 s (Shift 60 s) · ↑/↓ volume · ,/. frame · [/] speed · PgUp/PgDn next/prev chapter · I skip intro · A audio · J subtitles · O OpenSubtitles · T panel tab · N next episode · F fullscreen (player) · F11 fullscreen (anywhere) · M mute · S stop · Enter resume · Ctrl+1–8 Home/Movies/Series/Calendar/Watchlist/Library/Playing/Settings · ←/→ hero (Home) · Ctrl+L home layout · Ctrl+I details",
             ));
 
         div()
@@ -252,8 +242,8 @@ impl MediaHubView {
             .flex_col()
             .gap_6()
             .max_w(px(900.0))
+            .child(self.appearance_card(p, cx))
             .child(self.card(p).child(self.section_title("Libraries", p)).child(libs).child(self.add_library_row(p, cx)))
-            .child(self.card(p).child(self.section_title("Home layout", p)).child(layouts))
             .child(player)
             .child(services)
             .child(self.more_services(p, cx))

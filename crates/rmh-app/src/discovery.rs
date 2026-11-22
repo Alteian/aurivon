@@ -240,6 +240,19 @@ impl MediaService {
         })
     }
 
+    /// TMDB recommendations for one title ("Because you watched …")
+    pub fn browse_recommendations(&self, kind: Kind, tmdb_id: i32) -> impl Future<Output = ServiceResult<BrowseResults>> + 'static {
+        let tmdb = self.tmdb();
+        let http = self.inner.http.clone();
+        let images = self.inner.image_dir.clone();
+        let svc = self.clone();
+        self.run(async move {
+            let p = tmdb?.recommendations(kind, tmdb_id).await.map_err(|e| format!("{e:#}"))?;
+            svc.remember(&p.results);
+            Ok(BrowseResults { cards: with_posters(p.results, &http, &images).await, page: p.page, total_pages: p.total_pages, total_results: p.total_results })
+        })
+    }
+
     /// Filtered + sorted results (TMDB /discover)
     pub fn browse_discover(&self, mut q: DiscoverQuery) -> impl Future<Output = ServiceResult<BrowseResults>> + 'static {
         let tmdb = self.tmdb();

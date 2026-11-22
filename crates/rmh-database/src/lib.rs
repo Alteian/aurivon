@@ -69,3 +69,14 @@ impl Database {
 
 pub use repository::{MediaLink, MediaRepository};
 
+
+#[cfg(test)]
+mod migration_guard {
+    /// sqlx checksums applied migrations: editing 001 (even a comment) breaks
+    /// every existing database. Keep it byte-for-byte; add a new migration instead.
+    #[test]
+    fn migration_001_is_unchanged() {
+        let sql = include_str!("../migrations/001_initial_schema.sql");
+        assert!(sql.starts_with("-- RustMediaHub Database Schema\n"), "migrations/001 was edited");
+    }
+}

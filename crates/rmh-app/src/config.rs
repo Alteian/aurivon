@@ -131,6 +131,28 @@ pub struct AppConfig {
     /// Home rows that are visible (missing → shown). Keys: continue, up_next, watchlist, trakt_playback, trending, library
     #[serde(default = "default_home_rows")]
     pub home_rows: Vec<String>,
+    /// Set once the streaming home became the default (v0.7.0); older configs
+    /// are moved to it a single time, later choices stick
+    #[serde(default)]
+    pub home_stream_default: bool,
+    /// Appearance: theme id (aurum, midnight, oled, aurora, light, violet)
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// Accent override "#RRGGBB" (None = the theme's own accent)
+    #[serde(default)]
+    pub accent_color: Option<String>,
+    /// Follow the desktop's light / dark preference (Light theme when light)
+    #[serde(default)]
+    pub theme_follow_system: bool,
+    /// Card style on rows: "poster" | "landscape"
+    #[serde(default = "default_card_style")]
+    pub card_style: String,
+    /// Card size: "s" | "m" | "l"
+    #[serde(default = "default_card_size")]
+    pub card_size: String,
+    /// Navigation: "expanded" | "rail" | "top"
+    #[serde(default = "default_nav_style")]
+    pub nav_style: String,
     /// Installed Stremio-compatible addon base URLs (…/manifest.json resolved)
     #[serde(default)]
     pub addons: Vec<InstalledAddon>,
@@ -199,6 +221,18 @@ fn default_subs_cache_mb() -> u32 {
 fn default_library_type() -> String {
     "all".into()
 }
+fn default_theme() -> String {
+    "aurum".into()
+}
+fn default_card_style() -> String {
+    "poster".into()
+}
+fn default_card_size() -> String {
+    "m".into()
+}
+fn default_nav_style() -> String {
+    "expanded".into()
+}
 fn default_home_rows() -> Vec<String> {
     vec![
         "continue".into(),
@@ -249,8 +283,14 @@ pub fn lang_code(code: &str) -> String {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HomeLayout {
-    /// A: Continue Watching + Up Next
+    /// Streaming-first: hero carousel + Continue/Up next + discovery rows
     #[default]
+    Stream,
+    /// Hero-first: a tall cinematic hero, then the same rows
+    Cinematic,
+    /// Dense: no hero, small cards, tight rows
+    Compact,
+    /// A: Continue Watching + Up Next
     Focus,
     /// B: Trending / Discover with a hero banner
     Discover,
@@ -259,9 +299,28 @@ pub enum HomeLayout {
 }
 
 impl HomeLayout {
-    pub const ALL: [HomeLayout; 3] = [HomeLayout::Focus, HomeLayout::Discover, HomeLayout::Library];
+    pub const ALL: [HomeLayout; 6] =
+        [HomeLayout::Stream, HomeLayout::Cinematic, HomeLayout::Compact, HomeLayout::Focus, HomeLayout::Discover, HomeLayout::Library];
+    /// Layouts built on the streaming feed (hero + discovery rows)
+    pub fn is_feed(self) -> bool {
+        matches!(self, HomeLayout::Stream | HomeLayout::Cinematic | HomeLayout::Compact)
+    }
+    /// Short letter shown on the layout switcher
+    pub fn letter(self) -> &'static str {
+        match self {
+            HomeLayout::Stream => "S",
+            HomeLayout::Cinematic => "H",
+            HomeLayout::Compact => "D",
+            HomeLayout::Focus => "A",
+            HomeLayout::Discover => "B",
+            HomeLayout::Library => "C",
+        }
+    }
     pub fn label(self) -> &'static str {
         match self {
+            HomeLayout::Stream => "Streaming",
+            HomeLayout::Cinematic => "Cinematic",
+            HomeLayout::Compact => "Compact",
             HomeLayout::Focus => "Continue & Up Next",
             HomeLayout::Discover => "Discover",
             HomeLayout::Library => "Library",
@@ -333,6 +392,13 @@ impl Default for AppConfig {
             library_hide_watched: false,
             library_type_filter: default_library_type(),
             home_rows: default_home_rows(),
+            home_stream_default: true,
+            theme: default_theme(),
+            accent_color: None,
+            theme_follow_system: false,
+            card_style: default_card_style(),
+            card_size: default_card_size(),
+            nav_style: default_nav_style(),
             addons: vec![],
             torbox_api_key: std::env::var("TORBOX_API_KEY").ok(),
             alldebrid_api_key: std::env::var("ALLDEBRID_API_KEY").ok(),
@@ -382,6 +448,10 @@ impl AppConfig {
         }
         if config.home_rows.is_empty() {
             config.home_rows = default_home_rows();
+        }
+        if !config.home_stream_default {
+            config.home_layout = HomeLayout::Stream;
+            config.home_stream_default = true;
         }
         Ok(config)
     }

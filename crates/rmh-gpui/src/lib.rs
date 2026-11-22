@@ -1,10 +1,12 @@
 //! GPUI front end for Aurivon (same gpui-kit stack as Kalyreon).
 
+mod appearance;
 mod browse;
 mod calendar;
 mod details;
 mod disc;
 mod embed;
+mod feed;
 mod filters;
 mod home;
 mod lazy;

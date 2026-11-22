@@ -31,17 +31,49 @@ pub enum Page {
     Settings,
 }
 
-impl Page {
-    pub const NAV: [Page; 7] = [
-        Page::Home,
-        Page::Library,
-        Page::Watchlist,
-        Page::Discover,
-        Page::Calendar,
-        Page::Player,
-        Page::Settings,
+/// Sidebar entries: pages plus Search and Movies / Series (Browse pre-set)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Nav {
+    Page(Page),
+    Search,
+    Movies,
+    Series,
+}
+
+impl Nav {
+    /// Streaming first, the local library last (Ctrl+1… follows this order, Search excluded)
+    pub const ALL: [Nav; 9] = [
+        Nav::Page(Page::Home),
+        Nav::Search,
+        Nav::Movies,
+        Nav::Series,
+        Nav::Page(Page::Calendar),
+        Nav::Page(Page::Watchlist),
+        Nav::Page(Page::Library),
+        Nav::Page(Page::Player),
+        Nav::Page(Page::Settings),
     ];
 
+    pub fn label(self) -> &'static str {
+        match self {
+            Nav::Page(p) => p.label(),
+            Nav::Search => "Search",
+            Nav::Movies => "Movies",
+            Nav::Series => "Series",
+        }
+    }
+
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Nav::Page(p) => p.glyph(),
+            Nav::Search => "⌕",
+            Nav::Movies => "◎",
+            Nav::Series => "▣",
+        }
+    }
+}
+
+impl Page {
     pub fn label(self) -> &'static str {
         match self {
             Page::Home => "Home",
@@ -72,7 +104,7 @@ impl Page {
 
     pub fn subtitle(self) -> &'static str {
         match self {
-            Page::Home => "Pick up where you left off",
+            Page::Home => "What to watch tonight",
             Page::Library => "Everything in your local folders",
             Page::Watchlist => "Titles you want to watch · synced with Trakt",
             Page::Discover => "Trending, genres, filters and streaming services",
@@ -150,6 +182,13 @@ pub struct MediaHubView {
     pub(crate) results: Vec<TitleCard>,
     pub(crate) trending: Vec<TitleCard>,
     pub(crate) hero_backdrop: Option<PathBuf>,
+    /// Streaming home: hero carousel + lazy discovery rows
+    pub(crate) feed: crate::feed::HomeFeed,
+    /// "Play best" requested from the hero: start once streams are found
+    pub(crate) pending_play: Option<(TitleKind, i32)>,
+    pub(crate) autoplay_ready: bool,
+    /// gpui-kit components currently in light mode
+    pub(crate) kit_light: bool,
     pub(crate) searching: bool,
     pub(crate) details: Option<DetailsState>,
     pub(crate) streams: Vec<StreamHit>,
@@ -299,6 +338,10 @@ impl MediaHubView {
             results: Vec::new(),
             trending: Vec::new(),
             hero_backdrop: None,
+            feed: Default::default(),
+            pending_play: None,
+            autoplay_ready: false,
+            kit_light: false,
             searching: false,
             details: None,
             streams: Vec::new(),
@@ -340,8 +383,8 @@ impl MediaHubView {
             _subscriptions: subscriptions,
         };
         view.reload(cx);
-        // Trending (+ hero backdrop) is only shown on the Discover home layout
-        if view.svc.config().home_layout == HomeLayout::Discover {
+        // Trending feeds the hero (streaming + Discover home layouts)
+        if view.svc.config().home_layout == HomeLayout::Discover || view.svc.config().home_layout.is_feed() {
             view.load_trending(cx);
         }
         view.prune_image_cache(cx);
@@ -484,6 +527,15 @@ impl MediaHubView {
         .detach();
     }
 
+    pub(crate) fn nav_to(&mut self, item: Nav, window: &mut Window, cx: &mut Context<Self>) {
+        match item {
+            Nav::Page(p) => self.navigate(p, window, cx),
+            Nav::Search => self.open_search(window, cx),
+            Nav::Movies => self.browse_kind_home(TitleKind::Movie, window, cx),
+            Nav::Series => self.browse_kind_home(TitleKind::Tv, window, cx),
+        }
+    }
+
     pub(crate) fn navigate(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         if page == Page::Player && self.now.is_none() {
             return;
@@ -505,14 +557,35 @@ impl MediaHubView {
         cx.notify();
     }
 
+    /// The active palette (theme + accent + system light/dark)
+    pub(crate) fn palette(&self, window: &Window) -> crate::theme::Palette {
+        let cfg = self.svc.config();
+        let light = matches!(window.appearance(), WindowAppearance::Light | WindowAppearance::VibrantLight);
+        crate::theme::palette_for(&cfg.theme, cfg.accent_color.as_deref(), cfg.theme_follow_system, light)
+    }
+
+    /// Change appearance settings and save them (applies live)
+    pub(crate) fn set_appearance(&mut self, f: impl FnOnce(&mut rmh_app::AppConfig), cx: &mut Context<Self>) {
+        let mut cfg = self.svc.config();
+        f(&mut cfg);
+        if let Err(e) = self.svc.save_config(cfg) {
+            self.error = Some(e);
+        }
+        cx.notify();
+    }
+
     pub(crate) fn set_home_layout(&mut self, layout: HomeLayout, cx: &mut Context<Self>) {
         let mut cfg = self.svc.config();
         cfg.home_layout = layout;
         if let Err(e) = self.svc.save_config(cfg) {
             self.error = Some(e);
         }
-        if layout == HomeLayout::Discover && self.trending.is_empty() {
-            self.load_trending(cx);
+        if layout == HomeLayout::Discover || layout.is_feed() {
+            if self.trending.is_empty() {
+                self.load_trending(cx);
+            } else if layout == HomeLayout::Discover && self.hero_backdrop.is_none() {
+                self.load_hero(cx);
+            }
         }
         cx.notify();
     }
@@ -1130,7 +1203,14 @@ impl MediaHubView {
     }
 
     pub(crate) fn on_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pump_feed(cx);
         self.pump_images(cx);
+        if std::mem::take(&mut self.autoplay_ready) {
+            self.pending_play = None;
+            if self.page == Page::Details && !self.streams.is_empty() {
+                self.play_best(window, cx);
+            }
+        }
         if let Some((what, line)) = self.starting.as_mut() {
             let now = self.svc.start_status();
             if now.is_some() && now != *line {
@@ -1264,7 +1344,10 @@ impl MediaHubView {
                 match res {
                     Ok(t) => {
                         this.trending = t;
-                        this.load_hero(cx);
+                        // the streaming home loads its own (lazy) backdrops
+                        if this.svc.config().home_layout == HomeLayout::Discover {
+                            this.load_hero(cx);
+                        }
                     }
                     Err(e) => tracing::warn!("Trending failed: {e}"),
                 }
@@ -1379,6 +1462,9 @@ impl MediaHubView {
         self.streams.clear();
         self.stream_ctx = None;
         let (kind, id) = (state.kind, state.tmdb_id);
+        if self.pending_play.is_some() && (kind, id) != self.pending_play.map(|(k, i)| (Some(k), Some(i))).unwrap_or_default() {
+            self.pending_play = None;
+        }
         self.details = Some(state);
         self.navigate(Page::Details, window, cx);
         let (Some(kind), Some(id)) = (kind, id) else { return };
@@ -1394,10 +1480,25 @@ impl MediaHubView {
             let res = fut.await;
             this.update(cx, |this, cx| {
                 let mut load_season = None;
+                let mut autostream = None;
                 if let Some(d) = this.details.as_mut().filter(|d| d.tmdb_id == Some(id)) {
                     d.loading = false;
                     match res {
                         Ok((det, backdrop)) => {
+                            if this.pending_play == Some((kind, id)) && kind == TitleKind::Movie {
+                                if let Some(imdb) = det.imdb_id.clone() {
+                                    autostream = Some((
+                                        imdb.clone(),
+                                        StreamContext {
+                                            label: d.name.clone(),
+                                            trakt: Some(TraktItem::Movie { tmdb: id as i64 }),
+                                            imdb: Some(imdb),
+                                            episode: None,
+                                            tvdb_id: det.tvdb_id,
+                                        },
+                                    ));
+                                }
+                            }
                             if kind == TitleKind::Tv {
                                 let s = d.season.or_else(|| det.seasons.iter().find(|s| s.number > 0).map(|s| s.number));
                                 d.season = s;
@@ -1411,6 +1512,10 @@ impl MediaHubView {
                 }
                 if let Some(s) = load_season {
                     this.select_season(s, cx);
+                }
+                match autostream {
+                    Some((imdb, ctx)) => this.load_streams(imdb, None, ctx, cx),
+                    None => this.pending_play = None,
                 }
                 cx.notify();
             })
@@ -1465,6 +1570,9 @@ impl MediaHubView {
                     Ok(s) => {
                         this.status = Some(format!("{} streams found", s.len()));
                         this.streams = s;
+                        if this.pending_play.is_some() {
+                            this.autoplay_ready = true;
+                        }
                         this.probe_debrid(cx);
                     }
                     Err(e) => this.error = Some(e),
@@ -1800,18 +1908,19 @@ impl MediaHubView {
             return;
         }
         if ks.modifiers.control {
-            let page = match ks.key.as_str() {
-                "1" => Some(Page::Home),
-                "2" => Some(Page::Library),
-                "3" => Some(Page::Watchlist),
-                "4" => Some(Page::Discover),
-                "5" => Some(Page::Calendar),
-                "6" => Some(Page::Player),
-                "7" | "," => Some(Page::Settings),
+            let item = match ks.key.as_str() {
+                "1" => Some(Nav::Page(Page::Home)),
+                "2" => Some(Nav::Movies),
+                "3" => Some(Nav::Series),
+                "4" => Some(Nav::Page(Page::Calendar)),
+                "5" => Some(Nav::Page(Page::Watchlist)),
+                "6" => Some(Nav::Page(Page::Library)),
+                "7" => Some(Nav::Page(Page::Player)),
+                "8" | "," => Some(Nav::Page(Page::Settings)),
                 _ => None,
             };
-            if let Some(p) = page {
-                self.navigate(p, window, cx);
+            if let Some(item) = item {
+                self.nav_to(item, window, cx);
                 cx.stop_propagation();
                 return;
             }
@@ -1848,6 +1957,11 @@ impl MediaHubView {
             let handled = match self.page {
                 Page::Discover => self.browse_key(ks.key.as_str(), ks.modifiers.shift, window, cx),
                 Page::Calendar => self.calendar_key(ks.key.as_str(), ks.modifiers.shift, window, cx),
+                // hero carousel on the streaming home
+                Page::Home if self.svc.config().home_layout.is_feed() && matches!(ks.key.as_str(), "left" | "right") => {
+                    self.hero_step(if ks.key == "left" { -1 } else { 1 }, cx);
+                    true
+                }
                 Page::Details if ks.key == "w" => {
                     self.details_toggle_watchlist(cx);
                     true

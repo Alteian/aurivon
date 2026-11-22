@@ -35,6 +35,15 @@ impl LazyImages {
 }
 
 impl MediaHubView {
+    /// Ask for an image that isn't tied to a painted poster (hero backdrops)
+    pub(crate) fn want_image(&self, url: &str) {
+        if !self.lazy.ready.contains_key(url) {
+            self.lazy.wanted.borrow_mut().push(url.to_string());
+        }
+    }
+}
+
+impl MediaHubView {
     /// Poster that downloads itself when it scrolls into view. `have` is a
     /// file we already know about (library poster, cached card).
     pub(crate) fn lazy_poster(&self, seed: &str, have: Option<PathBuf>, url: Option<String>, glyph: Option<&str>) -> Div {
