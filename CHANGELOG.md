@@ -5,6 +5,15 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+### Added
+- Settings → Storage: usage by images / torrents / TMDB / calendar / subtitles, image + torrent caps, prune/clear, low-power mode, prefer-debrid-when-disk-full
+- Torrent orphan cleanup on startup and engine init; `stop_stream` can delete data; configurable torrent cache size
+- Watchlist page (nav ★ / Ctrl+3) with bi-directional Trakt sync; local remove also removes on Trakt; single Home watchlist row
+- Library type filter (All / Movies / Shows / Other), hide watched, rematch from Library
+- Installable Stremio addons (manifest URL), TorBox + AllDebrid keys beside Real-Debrid
+- Home row visibility toggles; next-episode stream presearch; TheIntroDB skip-intro when chapters are missing
+- Local library / addon content-type detection for movies vs series (SxxExx / Season folders)
+
 ## [0.5.0] - 2026-11-18
 
 ### Added

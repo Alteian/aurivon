@@ -500,6 +500,29 @@ impl TraktClient {
         self.post("/sync/watchlist", sync_body(std::slice::from_ref(item))).await.map(|_| ())
     }
 
+    pub async fn remove_from_watchlist(&self, item: &Item) -> Result<()> {
+        self.post("/sync/watchlist/remove", sync_body(std::slice::from_ref(item)))
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn remove_show_from_watchlist(&self, show_tmdb: i64) -> Result<()> {
+        self.post(
+            "/sync/watchlist/remove",
+            json!({ "shows": [{ "ids": { "tmdb": show_tmdb } }] }),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn add_shows_to_watchlist(&self, show_tmdb_ids: &[i64]) -> Result<()> {
+        if show_tmdb_ids.is_empty() {
+            return Ok(());
+        }
+        let shows: Vec<Value> = show_tmdb_ids.iter().map(|id| json!({ "ids": { "tmdb": id } })).collect();
+        self.post("/sync/watchlist", json!({ "shows": shows })).await.map(|_| ())
+    }
+
     /// Release calendar. `my` = shows/movies the user follows (needs login),
     /// otherwise everything on Trakt. Dates are UTC; `start` is YYYY-MM-DD.
     pub async fn calendar(&self, my: bool, what: CalendarKind, start: &str, days: u32) -> Result<Vec<CalendarEntry>> {

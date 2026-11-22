@@ -88,9 +88,111 @@ pub struct AppConfig {
     /// recently used images are removed first. Library posters are kept.
     #[serde(default = "default_image_cache_mb")]
     pub image_cache_mb: u32,
+    /// Max on-disk torrent cache (GB). Orphans are cleared on startup; active
+    /// streams still need room for the file being played.
+    #[serde(default = "default_torrent_cache_gb")]
+    pub torrent_cache_gb: u32,
+    /// Optional override for the torrent download directory
+    #[serde(default)]
+    pub torrent_dir: Option<PathBuf>,
+    /// Cap for cached TMDB JSON responses (MB)
+    #[serde(default = "default_tmdb_cache_mb")]
+    pub tmdb_cache_mb: u32,
+    /// Cap for release-calendar JSON (MB)
+    #[serde(default = "default_calendar_cache_mb")]
+    pub calendar_cache_mb: u32,
+    /// Cap for downloaded OpenSubtitles files (MB)
+    #[serde(default = "default_subs_cache_mb")]
+    pub subs_cache_mb: u32,
+    /// Prefer less network/disk work (no torrent warm-up until Play, fewer poster prefetches)
+    #[serde(default)]
+    pub low_power: bool,
+    /// Hide watched titles in the Library grid
+    #[serde(default)]
+    pub library_hide_watched: bool,
+    /// Library type filter: "all" | "movie" | "tv" | "other"
+    #[serde(default = "default_library_type")]
+    pub library_type_filter: String,
+    /// Home rows that are visible (missing → shown). Keys: continue, up_next, watchlist, trakt_playback, trending, library
+    #[serde(default = "default_home_rows")]
+    pub home_rows: Vec<String>,
+    /// Installed Stremio-compatible addon base URLs (…/manifest.json resolved)
+    #[serde(default)]
+    pub addons: Vec<InstalledAddon>,
+    /// TorBox API key (optional second debrid)
+    #[serde(default)]
+    pub torbox_api_key: Option<String>,
+    /// AllDebrid API key
+    #[serde(default)]
+    pub alldebrid_api_key: Option<String>,
+    /// Prefer Real-Debrid when the torrent cache is near its cap
+    #[serde(default = "yes")]
+    pub prefer_debrid_on_disk_pressure: bool,
+    /// Pre-search streams for the next episode while one is playing
+    #[serde(default = "yes")]
+    pub next_episode_presearch: bool,
+    /// Use TheIntroDB for skip-intro when chapters are missing
+    #[serde(default = "yes")]
+    pub introdb_skip: bool,
+    /// Last Trakt watchlist sync (unix seconds)
+    #[serde(default)]
+    pub trakt_watchlist_synced_at: Option<i64>,
+    /// Last Trakt watched sync (unix seconds)
+    #[serde(default)]
+    pub trakt_watched_synced_at: Option<i64>,
+    /// Watchlist conflict policy when merging with Trakt
+    #[serde(default)]
+    pub trakt_watchlist_policy: TraktWatchlistPolicy,
     /// Default stream picker filters and sort
     #[serde(default)]
     pub stream_filter: crate::streams::StreamFilter,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InstalledAddon {
+    pub url: String,
+    pub id: String,
+    pub name: String,
+    #[serde(default = "yes")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TraktWatchlistPolicy {
+    /// Union of local + Trakt (default)
+    #[default]
+    Merge,
+    /// Replace local with Trakt
+    TraktWins,
+    /// Keep local; only push adds to Trakt
+    LocalWins,
+}
+
+fn default_torrent_cache_gb() -> u32 {
+    8
+}
+fn default_tmdb_cache_mb() -> u32 {
+    50
+}
+fn default_calendar_cache_mb() -> u32 {
+    20
+}
+fn default_subs_cache_mb() -> u32 {
+    50
+}
+fn default_library_type() -> String {
+    "all".into()
+}
+fn default_home_rows() -> Vec<String> {
+    vec![
+        "continue".into(),
+        "up_next".into(),
+        "watchlist".into(),
+        "trakt_playback".into(),
+        "trending".into(),
+        "library".into(),
+    ]
 }
 
 fn default_image_cache_mb() -> u32 {
@@ -198,6 +300,24 @@ impl Default for AppConfig {
             auto_update: true,
             update_prereleases: false,
             image_cache_mb: default_image_cache_mb(),
+            torrent_cache_gb: default_torrent_cache_gb(),
+            torrent_dir: None,
+            tmdb_cache_mb: default_tmdb_cache_mb(),
+            calendar_cache_mb: default_calendar_cache_mb(),
+            subs_cache_mb: default_subs_cache_mb(),
+            low_power: false,
+            library_hide_watched: false,
+            library_type_filter: default_library_type(),
+            home_rows: default_home_rows(),
+            addons: vec![],
+            torbox_api_key: std::env::var("TORBOX_API_KEY").ok(),
+            alldebrid_api_key: std::env::var("ALLDEBRID_API_KEY").ok(),
+            prefer_debrid_on_disk_pressure: true,
+            next_episode_presearch: true,
+            introdb_skip: true,
+            trakt_watchlist_synced_at: None,
+            trakt_watched_synced_at: None,
+            trakt_watchlist_policy: TraktWatchlistPolicy::default(),
             stream_filter: Default::default(),
         }
     }
@@ -232,12 +352,29 @@ impl AppConfig {
             (&mut config.opensubtitles_password, "OPENSUBTITLES_PASSWORD"),
             (&mut config.simkl_client_id, "SIMKL_CLIENT_ID"),
             (&mut config.anilist_client_id, "ANILIST_CLIENT_ID"),
+            (&mut config.torbox_api_key, "TORBOX_API_KEY"),
+            (&mut config.alldebrid_api_key, "ALLDEBRID_API_KEY"),
         ] {
             if field.as_deref().unwrap_or("").is_empty() {
                 *field = std::env::var(var).ok();
             }
         }
+        if config.home_rows.is_empty() {
+            config.home_rows = default_home_rows();
+        }
         Ok(config)
+    }
+
+    pub fn torbox_key(&self) -> Option<String> {
+        self.torbox_api_key.clone().map(|k| k.trim().to_string()).filter(|k| !k.is_empty())
+    }
+
+    pub fn alldebrid_key(&self) -> Option<String> {
+        self.alldebrid_api_key.clone().map(|k| k.trim().to_string()).filter(|k| !k.is_empty())
+    }
+
+    pub fn home_row_visible(&self, key: &str) -> bool {
+        self.home_rows.iter().any(|r| r == key)
     }
 
     /// Trakt client id + secret, when both are set

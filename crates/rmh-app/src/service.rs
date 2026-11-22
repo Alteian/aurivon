@@ -187,7 +187,24 @@ impl MediaService {
             }),
         };
         svc.rebuild_scraper();
+        // Drop leftover torrent data and trim caches so a crash can't fill the disk
+        let prune = svc.prune_all_caches();
+        svc.inner.rt.spawn(async move {
+            if let Err(e) = prune.await {
+                tracing::warn!("Startup storage prune: {e}");
+            }
+        });
         Ok(svc)
+    }
+
+    /// Build a torrent engine using the user's download dir and DHT preference
+    pub(crate) fn torrent_engine_config(&self) -> rmh_torrent::TorrentEngineConfig {
+        let mut cfg = rmh_torrent::TorrentEngineConfig::default();
+        cfg.download_dir = self.torrent_dir();
+        if self.config().low_power {
+            cfg.enable_dht = false;
+        }
+        cfg
     }
 
     /// Run a future on the service runtime and await it from any executor
@@ -233,6 +250,12 @@ impl MediaService {
         let mut sc = ScraperAddonConfig::default();
         if let Some(key) = cfg.real_debrid_api_key.clone().filter(|k| !k.trim().is_empty()) {
             sc = sc.with_real_debrid(key);
+        }
+        if let Some(key) = cfg.torbox_key() {
+            sc = sc.with_torbox(key);
+        }
+        if let Some(key) = cfg.alldebrid_key() {
+            sc = sc.with_alldebrid(key);
         }
         if let Ok(mut s) = self.inner.scraper.write() {
             *s = Some(Arc::new(ScraperAddon::new(sc)));
@@ -374,6 +397,8 @@ impl MediaService {
     ) -> impl Future<Output = ServiceResult<Vec<StreamHit>>> + 'static {
         let imdb_id: String = imdb_id.into();
         let scraper = self.inner.scraper.read().ok().and_then(|s| s.clone());
+        let addons = self.config().addons;
+        let http = self.inner.http.clone();
         self.run(async move {
             let scraper = scraper.ok_or("Scraper not initialised")?;
             let query = match episode {
@@ -385,6 +410,57 @@ impl MediaService {
                 .await
                 .map_err(|e| format!("Stream search failed: {e}"))?;
             let mut hits: Vec<StreamHit> = results.iter().map(StreamHit::from).collect();
+
+            // Stremio-compatible installed addons
+            let (ctype, sid) = match episode {
+                Some((s, e)) => ("series".to_string(), format!("{imdb_id}:{s}:{e}")),
+                None => ("movie".to_string(), imdb_id.clone()),
+            };
+            for a in addons.into_iter().filter(|a| a.enabled) {
+                let url = format!("{}/stream/{}/{}.json", a.url.trim_end_matches('/'), ctype, sid);
+                if let Ok(resp) = http.get(&url).send().await {
+                    if resp.status().is_success() {
+                        if let Ok(body) = resp.json::<serde_json::Value>().await {
+                            if let Some(streams) = body.get("streams").and_then(|s| s.as_array()) {
+                                for s in streams {
+                                    let title = s
+                                        .get("title")
+                                        .or_else(|| s.get("name"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("Addon stream")
+                                        .to_string();
+                                    let info_hash = s.get("infoHash").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                    let url = s.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                    let magnet = if !url.is_empty() {
+                                        url
+                                    } else if !info_hash.is_empty() {
+                                        format!("magnet:?xt=urn:btih:{info_hash}")
+                                    } else {
+                                        continue;
+                                    };
+                                    let file_idx = s.get("fileIdx").and_then(|v| v.as_u64()).map(|v| v as u32);
+                                    let mut hit = StreamHit {
+                                        title: title.clone(),
+                                        quality: String::new(),
+                                        size: None,
+                                        seeders: None,
+                                        source: a.name.clone(),
+                                        rd_cached: false,
+                                        magnet,
+                                        info_hash,
+                                        file_idx,
+                                        traits: crate::streams::StreamTraits::parse(&title, None),
+                                        score: 0,
+                                    };
+                                    hit.quality = hit.traits.resolution.label().to_string();
+                                    hits.push(hit);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             crate::streams::sort_best(&mut hits);
             Ok(hits)
         })
@@ -422,13 +498,20 @@ impl MediaService {
     /// Start the torrent engine (DHT bootstrap, local stream server) while
     /// the user is still looking at the stream list
     pub fn warm_up_torrents(&self) {
+        if self.config().low_power {
+            return;
+        }
         let torrent = self.inner.torrent.clone();
+        let cfg = self.torrent_engine_config();
         self.inner.rt.spawn(async move {
             let mut guard = torrent.lock().await;
             if guard.is_none() {
-                let mut engine = TorrentEngine::with_defaults();
+                let mut engine = TorrentEngine::new(cfg);
                 match engine.initialize().await {
-                    Ok(()) => *guard = Some(Arc::new(engine)),
+                    Ok(()) => {
+                        let _ = engine.cleanup_orphans().await;
+                        *guard = Some(Arc::new(engine));
+                    }
                     Err(e) => tracing::warn!("Torrent engine failed: {e}"),
                 }
             }
@@ -457,13 +540,15 @@ impl MediaService {
         let scraper = self.inner.scraper.read().ok().and_then(|s| s.clone());
         let torrent = self.inner.torrent.clone();
         let status = self.inner.start_status.clone();
+        let disk_pressure = self.config().prefer_debrid_on_disk_pressure && self.torrent_disk_pressure();
+        let engine_cfg = self.torrent_engine_config();
         self.run(async move {
             let set = |s: Option<String>| {
                 if let Ok(mut g) = status.write() {
                     *g = s;
                 }
             };
-            let r = fast_start_inner(candidates, scraper, torrent, &set).await;
+            let r = fast_start_inner(candidates, scraper, torrent, engine_cfg, disk_pressure, &set).await;
             set(None);
             r
         })
@@ -481,6 +566,8 @@ async fn fast_start_inner(
     candidates: Vec<StreamHit>,
     scraper: Option<Arc<ScraperAddon>>,
     torrent: Arc<Mutex<Option<Arc<TorrentEngine>>>>,
+    engine_cfg: rmh_torrent::TorrentEngineConfig,
+    disk_pressure: bool,
     set: &(dyn Fn(Option<String>) + Sync),
 ) -> ServiceResult<ResolvedStream> {
     let started = std::time::Instant::now();
@@ -517,20 +604,26 @@ async fn fast_start_inner(
         }
     }
 
-    // 2. P2P race
-    set(Some("Starting torrent engine…".into()));
+    // 2. P2P race (narrower when the torrent cache is near its cap)
+    if disk_pressure {
+        set(Some("Torrent cache nearly full — preferring fewer peers…".into()));
+    } else {
+        set(Some("Starting torrent engine…".into()));
+    }
     let engine = {
         let mut guard = torrent.lock().await;
         if guard.is_none() {
-            let mut engine = TorrentEngine::with_defaults();
+            let mut engine = TorrentEngine::new(engine_cfg);
             engine.initialize().await.map_err(|e| format!("Torrent engine failed: {e}"))?;
+            let _ = engine.cleanup_orphans().await;
             *guard = Some(Arc::new(engine));
         }
         guard.clone().unwrap()
     };
     engine.stop_streams().await;
 
-    let racers: Vec<StreamHit> = candidates.into_iter().take(P2P_RACE).collect();
+    let race_n = if disk_pressure { 1 } else { P2P_RACE };
+    let racers: Vec<StreamHit> = candidates.into_iter().take(race_n).collect();
     let n = racers.len();
     let progress: Arc<RwLock<Vec<Racer>>> = Arc::new(RwLock::new(vec![Racer::default(); n]));
     let race = futures::future::select_ok(racers.into_iter().enumerate().map(|(i, hit)| {

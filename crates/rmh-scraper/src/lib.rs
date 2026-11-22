@@ -19,6 +19,7 @@ mod scrapers;
 mod cache;
 mod parser;
 mod addon;
+mod providers;
 
 pub use error::{ScraperError, ScraperResult};
 pub use debrid::{CacheProbe, RealDebrid, RealDebridConfig, DebridStream};
@@ -26,3 +27,4 @@ pub use scrapers::{Scraper, ScraperManager, ScrapedResult, SearchQuery, human_re
 pub use cache::ScraperCache;
 pub use parser::{TorrentInfo, parse_torrent_title};
 pub use addon::{ScraperAddon, ScraperAddonConfig, create_scraper_addon};
+pub use providers::{AllDebrid, DebridProvider, TorBox};

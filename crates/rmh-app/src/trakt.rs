@@ -33,7 +33,7 @@ pub struct TraktLists {
 }
 
 impl MediaService {
-    fn trakt_client(&self) -> ServiceResult<TraktClient> {
+    pub(crate) fn trakt_client(&self) -> ServiceResult<TraktClient> {
         self.inner
             .trakt
             .read()
@@ -106,6 +106,18 @@ impl MediaService {
             let r = match kind {
                 rmh_metadata::Kind::Movie => c.add_to_watchlist(&Item::Movie { tmdb: tmdb_id as i64 }).await,
                 rmh_metadata::Kind::Tv => c.add_show_to_watchlist(tmdb_id as i64).await,
+            };
+            r.map_err(|e| format!("{e:#}"))
+        })
+    }
+
+    pub fn trakt_remove_from_watchlist(&self, kind: crate::catalog::TitleKind, tmdb_id: i32) -> impl Future<Output = ServiceResult<()>> + 'static {
+        let client = self.trakt_client();
+        self.run(async move {
+            let c = client?;
+            let r = match kind {
+                rmh_metadata::Kind::Movie => c.remove_from_watchlist(&Item::Movie { tmdb: tmdb_id as i64 }).await,
+                rmh_metadata::Kind::Tv => c.remove_show_from_watchlist(tmdb_id as i64).await,
             };
             r.map_err(|e| format!("{e:#}"))
         })

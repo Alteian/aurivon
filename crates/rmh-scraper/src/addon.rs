@@ -6,6 +6,7 @@
 use crate::cache::ScraperCache;
 use crate::debrid::{RealDebrid, RealDebridConfig};
 use crate::error::{ScraperError, ScraperResult};
+use crate::providers::{AllDebrid, TorBox};
 use crate::scrapers::{ScrapedResult, ScraperManager, SearchQuery};
 use crate::scrapers::torrentio::{TorrentioScraper, TorrentioConfig};
 
@@ -23,6 +24,8 @@ use tracing::{debug, info, warn};
 pub struct ScraperAddonConfig {
     /// Real-Debrid API key
     pub real_debrid_api_key: Option<String>,
+    pub torbox_api_key: Option<String>,
+    pub alldebrid_api_key: Option<String>,
     /// Enable Torrentio scraper
     pub enable_torrentio: bool,
     /// Minimum seeders to show (for non-cached results)
@@ -35,6 +38,8 @@ impl Default for ScraperAddonConfig {
     fn default() -> Self {
         Self {
             real_debrid_api_key: None,
+            torbox_api_key: None,
+            alldebrid_api_key: None,
             enable_torrentio: true,
             min_seeders: 0,
             // keep every result: the stream picker filters and sorts them
@@ -48,6 +53,16 @@ impl ScraperAddonConfig {
         self.real_debrid_api_key = Some(api_key.into());
         self
     }
+
+    pub fn with_torbox(mut self, api_key: impl Into<String>) -> Self {
+        self.torbox_api_key = Some(api_key.into());
+        self
+    }
+
+    pub fn with_alldebrid(mut self, api_key: impl Into<String>) -> Self {
+        self.alldebrid_api_key = Some(api_key.into());
+        self
+    }
 }
 
 /// Scraper addon that aggregates torrents and resolves through Real-Debrid
@@ -56,6 +71,8 @@ pub struct ScraperAddon {
     config: ScraperAddonConfig,
     scrapers: Arc<RwLock<ScraperManager>>,
     real_debrid: Option<RealDebrid>,
+    torbox: Option<TorBox>,
+    alldebrid: Option<AllDebrid>,
     cache: ScraperCache,
     initialized: Arc<RwLock<bool>>,
 }
@@ -65,6 +82,8 @@ impl ScraperAddon {
         let rd = config.real_debrid_api_key.as_ref().map(|key| {
             RealDebrid::new(RealDebridConfig::new(key.clone()))
         });
+        let torbox = config.torbox_api_key.as_ref().filter(|k| !k.is_empty()).map(|k| TorBox::new(k.clone()));
+        let alldebrid = config.alldebrid_api_key.as_ref().filter(|k| !k.is_empty()).map(|k| AllDebrid::new(k.clone()));
 
         Self {
             manifest: AddonManifest::new(
@@ -78,6 +97,8 @@ impl ScraperAddon {
             config,
             scrapers: Arc::new(RwLock::new(ScraperManager::new())),
             real_debrid: rd,
+            torbox,
+            alldebrid,
             cache: ScraperCache::new(),
             initialized: Arc::new(RwLock::new(false)),
         }
@@ -222,13 +243,29 @@ impl ScraperAddon {
             }
         }
 
-        // Not cached or no RD - return magnet for torrent streaming
+        // Fallback debrid providers when RD did not mark the torrent cached
+        if let Some(ref tb) = self.torbox {
+            if let Ok(Some(url)) = tb.resolve_cached(&result.info_hash).await {
+                return Ok(url);
+            }
+        }
+        if let Some(ref ad) = self.alldebrid {
+            if let Ok(Some(url)) = ad.resolve_cached(&result.info_hash).await {
+                return Ok(url);
+            }
+        }
+
+        // Not cached or no debrid - return magnet for torrent streaming
         Ok(result.magnet.clone())
     }
 
     /// Check if Real-Debrid is configured and working
     pub fn has_real_debrid(&self) -> bool {
         self.real_debrid.is_some()
+    }
+
+    pub fn has_any_debrid(&self) -> bool {
+        self.real_debrid.is_some() || self.torbox.is_some() || self.alldebrid.is_some()
     }
 }
 

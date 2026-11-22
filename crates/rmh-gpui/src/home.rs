@@ -45,23 +45,24 @@ impl MediaHubView {
             HomeLayout::Discover => self.home_discover(p, cx),
             HomeLayout::Library => self.home_library(p, cx),
         };
+        let cfg = self.svc.config();
         let mut col = div().flex().flex_col().gap_6().child(self.layout_switcher(p, cx)).child(body);
-        if !self.disc.watch_cards.is_empty() {
+        if cfg.home_row_visible("watchlist") && !self.disc.watch_cards.is_empty() {
             let cards = self.disc.watch_cards.iter().map(|c| self.title_card(c, "home-wl", 150.0, p, cx)).collect();
-            col = col.child(self.section("Your watchlist", Some(format!("{} titles", self.disc.watch_cards.len())), self.row("home-wl", cards), p));
+            col = col.child(self.section("Your watchlist", Some(format!("{} titles · synced with Trakt", self.disc.watch_cards.len())), self.row("home-wl", cards), p));
         }
         col.into_any_element()
     }
 
-    /// Trakt continue-watching / watchlist cards that aren't in the local library
+    /// Trakt continue-watching (watchlist is unified into the local list)
     fn trakt_rows(&self, p: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        if !self.trakt.logged_in || self.trakt_cards.is_empty() {
+        if !self.trakt.logged_in || self.trakt_cards.is_empty() || !self.svc.config().home_row_visible("trakt_playback") {
             return vec![];
         }
         let local: std::collections::HashSet<i64> =
             self.entries.iter().filter_map(|e| e.link.as_ref().and_then(|l| l.tmdb_id)).collect();
         let playback_ids: Vec<i64> = self.trakt_lists.playback.iter().filter_map(|e| e.tmdb_id()).collect();
-        let (mut resume, mut watch) = (vec![], vec![]);
+        let mut resume = vec![];
         for c in &self.trakt_cards {
             let id = c.title.tmdb_id as i64;
             if local.contains(&id) {
@@ -69,16 +70,11 @@ impl MediaHubView {
             }
             if playback_ids.contains(&id) {
                 resume.push(self.title_card(c, "trakt-pb", 150.0, p, cx));
-            } else {
-                watch.push(self.title_card(c, "trakt-wl", 150.0, p, cx));
             }
         }
         let mut out = vec![];
         if !resume.is_empty() {
             out.push(self.section("Continue on Trakt", Some("started elsewhere · stream it here".into()), self.row("trakt-pb", resume), p));
-        }
-        if !watch.is_empty() {
-            out.push(self.section("Your Trakt watchlist", None, self.row("trakt-wl", watch), p));
         }
         out
     }
@@ -88,33 +84,38 @@ impl MediaHubView {
         if self.entries.is_empty() && !self.trakt.logged_in {
             return self.empty_state("Welcome to Aurivon", "Add a folder with movies, shows or music to get started.", p, cx);
         }
+        let cfg = self.svc.config();
         let cont = self.continue_entries();
         let next = up_next(&self.entries);
         let mut col = div().flex().flex_col().gap_8();
-        col = col.child(self.section(
-            "Continue watching",
-            Some(format!("{} in progress", cont.len())),
-            if cont.is_empty() {
-                div().text_sm().text_color(rgb(p.muted)).child("Nothing in progress. Start something below.").into_any_element()
-            } else {
-                self.row("cont", cont.iter().take(12).map(|e| self.wide_entry_card(e, "cont", p, cx)).collect())
-            },
-            p,
-        ));
-        col = col.child(self.section(
-            "Up next",
-            Some("next unwatched episode of shows you're watching".into()),
-            if next.is_empty() {
-                div()
-                    .text_sm()
-                    .text_color(rgb(p.muted))
-                    .child("Finish an episode and the next one shows up here (autoplay plays it for you).")
-                    .into_any_element()
-            } else {
-                self.row("next", next.iter().map(|e| self.entry_card(e, "next", 170.0, p, cx)).collect())
-            },
-            p,
-        ));
+        if cfg.home_row_visible("continue") {
+            col = col.child(self.section(
+                "Continue watching",
+                Some(format!("{} in progress", cont.len())),
+                if cont.is_empty() {
+                    div().text_sm().text_color(rgb(p.muted)).child("Nothing in progress. Start something below.").into_any_element()
+                } else {
+                    self.row("cont", cont.iter().take(12).map(|e| self.wide_entry_card(e, "cont", p, cx)).collect())
+                },
+                p,
+            ));
+        }
+        if cfg.home_row_visible("up_next") {
+            col = col.child(self.section(
+                "Up next",
+                Some("next unwatched episode of shows you're watching".into()),
+                if next.is_empty() {
+                    div()
+                        .text_sm()
+                        .text_color(rgb(p.muted))
+                        .child("Finish an episode and the next one shows up here (autoplay plays it for you).")
+                        .into_any_element()
+                } else {
+                    self.row("next", next.iter().map(|e| self.entry_card(e, "next", 170.0, p, cx)).collect())
+                },
+                p,
+            ));
+        }
         for r in self.trakt_rows(p, cx) {
             col = col.child(r);
         }
@@ -215,7 +216,7 @@ impl MediaHubView {
                 p,
             ));
         }
-        if self.trending.len() > 1 {
+        if self.svc.config().home_row_visible("trending") && self.trending.len() > 1 {
             let movies: Vec<AnyElement> =
                 self.trending.iter().skip(1).filter(|c| c.title.kind == TitleKind::Movie).map(|c| self.title_card(c, "trm", 160.0, p, cx)).collect();
             let shows: Vec<AnyElement> =
@@ -312,8 +313,21 @@ impl MediaHubView {
         if self.entries.is_empty() && self.libraries.is_empty() {
             return self.empty_state("Your library is empty", "Type a folder path or browse for one. It's scanned right away.", p, cx);
         }
+        let cfg = self.svc.config();
         let items = self.filtered_entries(cx);
         let count = items.len();
+        let type_pills: Vec<AnyElement> = [("all", "All"), ("movie", "Movies"), ("tv", "Shows"), ("other", "Other")]
+            .iter()
+            .map(|(id, label)| {
+                let id = (*id).to_string();
+                self.pill(SharedString::from(format!("lib-type-{id}")), (*label).to_string(), cfg.library_type_filter == id, p)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        let id = id.clone();
+                        this.update_config(|c| c.library_type_filter = id, false, cx);
+                    }))
+                    .into_any_element()
+            })
+            .collect();
         div()
             .flex()
             .flex_col()
@@ -327,8 +341,49 @@ impl MediaHubView {
                     .child(div().w(px(320.0)).child(Input::new(&self.filter_input).w_full()))
                     .child(self.add_library_row(p, cx)),
             )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .children(type_pills)
+                    .child(
+                        self.pill("lib-hide-watched", "Hide watched", cfg.library_hide_watched, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.update_config(|c| c.library_hide_watched = !c.library_hide_watched, false, cx);
+                        })),
+                    )
+                    .child(self.button("lib-rematch", "Re-match", false, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.match_library(true, cx)))),
+            )
             .child(div().text_sm().text_color(rgb(p.muted)).child(format!("{count} files · click for details, double-click to play")))
             .child(self.grid(self.library_cards(&items, "lib", p, cx)))
             .into_any_element()
+    }
+
+    pub(crate) fn watchlist_page(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let cards = &self.disc.watch_cards;
+        let mut col = div().flex().flex_col().gap_6().child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_4()
+                .child(div().text_sm().text_color(rgb(p.muted)).child(if self.trakt.logged_in {
+                    format!("{} titles · linked to Trakt", cards.len())
+                } else {
+                    format!("{} titles · connect Trakt in Settings to sync", cards.len())
+                }))
+                .when(self.trakt.logged_in, |d| {
+                    d.child(
+                        self.button("wl-sync", "Sync with Trakt", true, p)
+                            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.sync_watchlist_only(cx))),
+                    )
+                }),
+        );
+        if cards.is_empty() {
+            col = col.child(div().text_sm().text_color(rgb(p.muted)).child("Press W on any title to add it. Sync pulls your Trakt watchlist here."));
+        } else {
+            col = col.child(self.grid(cards.iter().map(|c| self.title_card(c, "wl-page", 168.0, p, cx)).collect()));
+        }
+        col.into_any_element()
     }
 }

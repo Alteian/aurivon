@@ -23,7 +23,7 @@ impl MediaHubView {
         self.toggle_row(id, label, hint, on, p)
     }
 
-    fn toggle_row(&self, id: &'static str, label: &'static str, hint: &'static str, on: bool, p: Palette) -> Stateful<Div> {
+    pub(crate) fn toggle_row(&self, id: &'static str, label: &'static str, hint: &'static str, on: bool, p: Palette) -> Stateful<Div> {
         div()
             .id(id)
             .flex()
@@ -188,6 +188,13 @@ impl MediaHubView {
                 ),
             )
             .child(self.field("Real-Debrid API key", "Optional. Cached torrents play instantly over HTTPS.", &self.rd_input, p))
+            .child(
+                div()
+                    .flex()
+                    .gap_4()
+                    .child(div().flex_1().child(self.field("TorBox API key", "Optional second debrid", &self.disc.inputs.torbox, p)))
+                    .child(div().flex_1().child(self.field("AllDebrid API key", "Optional third debrid", &self.disc.inputs.alldebrid, p))),
+            )
             .child(div().h(px(4.0)))
             .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("Trakt"))
             .child(div().text_xs().text_color(rgb(p.muted)).child(trakt_state))
@@ -212,6 +219,14 @@ impl MediaHubView {
                 )
             })
             .child(trakt_actions)
+            .when(self.trakt.logged_in, |d| {
+                d.child(
+                    div().flex().gap_2().child(
+                        self.button("trakt-wl-sync", "Sync watchlist", false, p)
+                            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.sync_watchlist_only(cx))),
+                    ),
+                )
+            })
             .child(
                 self.toggle_row("tg-scrobble", "Scrobble to Trakt", "Send start/pause/stop while watching", cfg.trakt_scrobble, p)
                     .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.update_config(|c| c.trakt_scrobble = !c.trakt_scrobble, false, cx))),
@@ -243,7 +258,7 @@ impl MediaHubView {
                 if self.svc.has_real_debrid() { "Real-Debrid: configured" } else { "Real-Debrid: not configured (P2P only)" }.into(),
             ))
             .child(div().text_xs().text_color(rgb(p.faint)).child(
-                "Keys: Ctrl+K or / search · Space/K play · ←/→ 10 s (Shift 60 s) · ↑/↓ volume · ,/. frame · [/] speed · PgUp/PgDn next/prev chapter · I skip intro · A audio · J subtitles · O OpenSubtitles · T panel tab · N next episode · F fullscreen (player) · F11 fullscreen (anywhere) · M mute · S stop · Enter resume · Ctrl+1–6 pages · Ctrl+L home layout · Ctrl+I details",
+                "Keys: Ctrl+K or / search · Space/K play · ←/→ 10 s (Shift 60 s) · ↑/↓ volume · ,/. frame · [/] speed · PgUp/PgDn next/prev chapter · I skip intro · A audio · J subtitles · O OpenSubtitles · T panel tab · N next episode · F fullscreen (player) · F11 fullscreen (anywhere) · M mute · S stop · Enter resume · Ctrl+1–7 pages · Ctrl+L home layout · Ctrl+I details",
             ));
 
         div()
@@ -258,9 +273,134 @@ impl MediaHubView {
             .child(self.more_services(p, cx))
             .child(self.stream_filter_card(p, cx))
             .child(self.cache_card(p, cx))
+            .child(self.home_rows_card(p, cx))
+            .child(self.addons_card(p, cx))
+            .child(self.playback_extras_card(p, cx))
             .child(self.updates_card(p, cx))
             .child(status)
             .into_any_element()
+    }
+
+    fn home_rows_card(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let cfg = self.svc.config();
+        let rows = [
+            ("continue", "Continue watching"),
+            ("up_next", "Up next"),
+            ("watchlist", "Watchlist"),
+            ("trakt_playback", "Continue on Trakt"),
+            ("trending", "Trending"),
+            ("library", "Library grid"),
+        ];
+        let mut body = div().flex().flex_wrap().gap_2();
+        for (key, label) in rows {
+            let key = key.to_string();
+            let on = cfg.home_row_visible(&key);
+            body = body.child(
+                self.pill(SharedString::from(format!("home-row-{key}")), label.to_string(), on, p).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                    let key = key.clone();
+                    this.update_config(
+                        move |c| {
+                            if c.home_rows.iter().any(|r| r == &key) {
+                                c.home_rows.retain(|r| r != &key);
+                            } else {
+                                c.home_rows.push(key);
+                            }
+                        },
+                        false,
+                        cx,
+                    );
+                })),
+            );
+        }
+        self.card(p)
+            .child(self.section_title("Home rows", p))
+            .child(div().text_sm().text_color(rgb(p.muted)).child("Choose which rows appear on Home."))
+            .child(body)
+    }
+
+    fn playback_extras_card(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let cfg = self.svc.config();
+        self.card(p)
+            .child(self.section_title("Playback extras", p))
+            .child(
+                self.toggle_row(
+                    "tg-presearch",
+                    "Pre-search next episode",
+                    "Look up streams for the next episode while one is playing",
+                    cfg.next_episode_presearch,
+                    p,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                    this.update_config(|c| c.next_episode_presearch = !c.next_episode_presearch, false, cx)
+                })),
+            )
+            .child(
+                self.toggle_row(
+                    "tg-introdb",
+                    "TheIntroDB skip intro",
+                    "When chapters are missing, use community intro/credits timestamps",
+                    cfg.introdb_skip,
+                    p,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.update_config(|c| c.introdb_skip = !c.introdb_skip, false, cx))),
+            )
+    }
+
+    fn addons_card(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let addons = self.svc.list_addons();
+        let mut list = div().flex().flex_col().gap_2();
+        for a in &addons {
+            let id = a.id.clone();
+            let enabled = a.enabled;
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(div().text_sm().child(format!("{} ({})", a.name, a.id)))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                self.pill(
+                                    SharedString::from(format!("addon-en-{id}")),
+                                    SharedString::from(if enabled { "On" } else { "Off" }),
+                                    enabled,
+                                    p,
+                                )
+                                .on_click({
+                                    let id = id.clone();
+                                    cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                                        let _ = this.svc.set_addon_enabled(&id, !enabled);
+                                        cx.notify();
+                                    })
+                                }),
+                            )
+                            .child(self.button(SharedString::from(format!("addon-rm-{id}")), "Remove", false, p).on_click({
+                                let id = id.clone();
+                                cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                                    let _ = this.svc.remove_addon(&id);
+                                    this.status = Some("Addon removed".into());
+                                    cx.notify();
+                                })
+                            })),
+                    ),
+            );
+        }
+        self.card(p)
+            .child(self.section_title("Stremio addons", p))
+            .child(div().text_sm().text_color(rgb(p.muted)).child("Install community addons by manifest URL. Streams are queried alongside Torrentio."))
+            .child(list)
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().flex_1().child(self.field("Addon URL", "https://addon.example/manifest.json", &self.disc.inputs.addon_url, p)))
+                    .child(self.button("addon-install", "Install", true, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.install_addon(cx)))),
+            )
     }
 
     /// Region, OpenSubtitles, Simkl, AniList

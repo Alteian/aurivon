@@ -22,6 +22,7 @@ use crate::embed::VideoHost;
 pub enum Page {
     Home,
     Library,
+    Watchlist,
     Discover,
     Calendar,
     Player,
@@ -31,12 +32,21 @@ pub enum Page {
 }
 
 impl Page {
-    pub const NAV: [Page; 6] = [Page::Home, Page::Library, Page::Discover, Page::Calendar, Page::Player, Page::Settings];
+    pub const NAV: [Page; 7] = [
+        Page::Home,
+        Page::Library,
+        Page::Watchlist,
+        Page::Discover,
+        Page::Calendar,
+        Page::Player,
+        Page::Settings,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Page::Home => "Home",
             Page::Library => "Library",
+            Page::Watchlist => "Watchlist",
             Page::Discover => "Browse",
             Page::Calendar => "Calendar",
             Page::Player => "Now Playing",
@@ -50,6 +60,7 @@ impl Page {
         match self {
             Page::Home => "⌂",
             Page::Library => "▤",
+            Page::Watchlist => "★",
             Page::Discover => "◎",
             Page::Calendar => "▦",
             Page::Player => "▶",
@@ -63,6 +74,7 @@ impl Page {
         match self {
             Page::Home => "Pick up where you left off",
             Page::Library => "Everything in your local folders",
+            Page::Watchlist => "Titles you want to watch · synced with Trakt",
             Page::Discover => "Trending, genres, filters and streaming services",
             Page::Calendar => "New episodes, premieres, cinema and digital releases",
             Page::Player => "",
@@ -103,6 +115,10 @@ pub struct DetailsState {
 pub struct StreamContext {
     pub label: String,
     pub trakt: Option<TraktItem>,
+    /// For next-episode presearch
+    pub imdb: Option<String>,
+    pub episode: Option<(u32, u32)>,
+    pub tvdb_id: Option<i32>,
 }
 
 pub struct MediaHubView {
@@ -171,7 +187,13 @@ pub struct MediaHubView {
     pub(crate) stream_filter: rmh_app::StreamFilter,
     pub(crate) stream_filters_open: bool,
     /// Image cache size, refreshed when Settings opens
-    pub(crate) image_cache: Option<rmh_app::images::CacheUsage>,
+    pub(crate) image_cache: Option<rmh_app::CacheUsage>,
+    /// Full storage report for Settings → Storage
+    pub(crate) storage_report: Option<rmh_app::StorageReport>,
+    /// Skip-intro segments from TheIntroDB for the current playback
+    pub(crate) intro_segments: Option<rmh_app::IntroSegments>,
+    /// Prefetched streams for the next episode
+    pub(crate) next_ep_streams: Vec<StreamHit>,
     pub(crate) video: Option<Rc<VideoHost>>,
     pub(crate) video_checked: bool,
     pub(crate) mpv_version: Option<String>,
@@ -308,6 +330,9 @@ impl MediaHubView {
             stream_filters_open: false,
             starting: None,
             image_cache: None,
+            storage_report: None,
+            intro_segments: None,
+            next_ep_streams: vec![],
             video: None,
             video_checked: false,
             disc,
@@ -604,12 +629,30 @@ impl MediaHubView {
         .detach();
     }
 
-    /// Library entries matching the filter box
+    /// Library entries matching the filter box + type / watched filters
     pub(crate) fn filtered_entries(&self, cx: &App) -> Vec<&LibraryEntry> {
         let filter = self.filter_input.read(cx).value().to_lowercase();
+        let cfg = self.svc.config();
+        let hide_watched = cfg.library_hide_watched;
+        let type_f = cfg.library_type_filter.clone();
         self.entries
             .iter()
             .filter(|e| {
+                if hide_watched && e.item.watched {
+                    return false;
+                }
+                let type_ok = match type_f.as_str() {
+                    "movie" => matches!(e.item.media_type, rmh_app::MediaType::Movie) && e.kind() != Some(TitleKind::Tv),
+                    "tv" => {
+                        e.kind() == Some(TitleKind::Tv)
+                            || matches!(e.item.media_type, rmh_app::MediaType::Episode | rmh_app::MediaType::TvShow)
+                    }
+                    "other" => matches!(e.item.media_type, rmh_app::MediaType::Unknown),
+                    _ => true,
+                };
+                if !type_ok {
+                    return false;
+                }
                 filter.is_empty()
                     || e.display_title().to_lowercase().contains(&filter)
                     || e.item.file_name.to_lowercase().contains(&filter)
@@ -640,15 +683,92 @@ impl MediaHubView {
         self.eof_handled = false;
         self.thumb = None;
         self.hover_seek = None;
+        self.intro_segments = None;
+        self.next_ep_streams.clear();
     }
 
     fn after_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.snap = PlaybackSnapshot::default();
+        self.intro_segments = None;
+        self.next_ep_streams.clear();
         if self.embedded() || self.page == Page::Player {
             self.navigate(Page::Player, window, cx);
         }
         window.focus(&self.focus_handle, cx);
+        self.fetch_intro_and_presearch(cx);
         cx.notify();
+    }
+
+    fn fetch_intro_and_presearch(&mut self, cx: &mut Context<Self>) {
+        let cfg = self.svc.config();
+        if cfg.introdb_skip {
+            let tvdb = self
+                .stream_ctx
+                .as_ref()
+                .and_then(|c| c.tvdb_id)
+                .or_else(|| self.details.as_ref().and_then(|d| d.details.as_ref()).and_then(|d| d.tvdb_id));
+            let duration_ms = self.snap.duration.map(|d| (d * 1000.0) as u64).unwrap_or(0);
+            if let Some(tvdb) = tvdb.filter(|id| *id > 0) {
+                let fut = self.svc.intro_segments(tvdb, duration_ms.max(1));
+                cx.spawn(async move |this, cx| {
+                    let res = fut.await;
+                    this.update(cx, |this, cx| {
+                        if let Ok(segs) = res {
+                            this.intro_segments = Some(segs);
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+        if cfg.next_episode_presearch {
+            if let Some(ctx) = self.stream_ctx.clone() {
+                if let (Some(imdb), Some((s, e))) = (ctx.imdb.clone(), ctx.episode) {
+                    let fut = self.svc.search_streams_for(imdb, Some((s, e + 1)));
+                    cx.spawn(async move |this, cx| {
+                        let res = fut.await;
+                        this.update(cx, |this, cx| {
+                            if let Ok(streams) = res {
+                                this.next_ep_streams = streams;
+                                if !this.next_ep_streams.is_empty() {
+                                    tracing::info!("Presearched {} streams for next episode", this.next_ep_streams.len());
+                                }
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn install_addon(&mut self, cx: &mut Context<Self>) {
+        let url = self.disc.inputs.addon_url.read(cx).value().trim().to_string();
+        if url.is_empty() {
+            self.error = Some("Paste an addon manifest URL first".into());
+            cx.notify();
+            return;
+        }
+        self.busy = Some("Installing addon…".into());
+        cx.notify();
+        let fut = self.svc.install_addon(url);
+        cx.spawn(async move |this, cx| {
+            let res = fut.await;
+            this.update(cx, |this, cx| {
+                this.busy = None;
+                match res {
+                    Ok(a) => this.status = Some(format!("Installed {}", a.name)),
+                    Err(e) => this.error = Some(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn play_item(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
@@ -768,21 +888,48 @@ impl MediaHubView {
 
     /// Current chapter is an intro/recap: (button label, seek target)
     pub(crate) fn skip_target(&self) -> Option<(&'static str, f64)> {
-        let idx = self.snap.chapter? as usize;
-        let ch = self.snap.chapters.get(idx)?;
-        let t = ch.title.to_lowercase();
-        let is = |words: &[&str]| words.iter().any(|w| t == *w || t.contains(w));
-        let label = if is(&["intro", "opening", "opening credits", "title sequence"]) || t == "op" {
-            "Skip intro"
-        } else if is(&["recap", "previously"]) {
-            "Skip recap"
-        } else if is(&["credits", "ending", "outro", "end credits"]) || t == "ed" {
-            "Skip credits"
-        } else {
-            return None;
-        };
-        let target = self.snap.chapters.get(idx + 1).map(|c| c.time).or(self.snap.duration.map(|d| (d - 1.0).max(0.0)))?;
-        Some((label, target))
+        if let Some(idx) = self.snap.chapter.map(|c| c as usize) {
+            if let Some(ch) = self.snap.chapters.get(idx) {
+                let t = ch.title.to_lowercase();
+                let is = |words: &[&str]| words.iter().any(|w| t == *w || t.contains(w));
+                let label = if is(&["intro", "opening", "opening credits", "title sequence"]) || t == "op" {
+                    Some("Skip intro")
+                } else if is(&["recap", "previously"]) {
+                    Some("Skip recap")
+                } else if is(&["credits", "ending", "outro", "end credits"]) || t == "ed" {
+                    Some("Skip credits")
+                } else {
+                    None
+                };
+                if let Some(label) = label {
+                    let target = self.snap.chapters.get(idx + 1).map(|c| c.time).or(self.snap.duration.map(|d| (d - 1.0).max(0.0)))?;
+                    return Some((label, target));
+                }
+            }
+        }
+        // TheIntroDB fallback when chapters are missing
+        let pos = self.snap.position;
+        let segs = self.intro_segments.as_ref()?;
+        if let Some(end_ms) = segs.recap_end_ms {
+            let end = end_ms as f64 / 1000.0;
+            if pos < end {
+                return Some(("Skip recap", end));
+            }
+        }
+        if let Some(end_ms) = segs.intro_end_ms {
+            let end = end_ms as f64 / 1000.0;
+            if pos < end {
+                return Some(("Skip intro", end));
+            }
+        }
+        if let Some(start_ms) = segs.credits_start_ms {
+            let start = start_ms as f64 / 1000.0;
+            if pos >= start {
+                let dur = self.snap.duration.unwrap_or(start + 1.0);
+                return Some(("Skip credits", (dur - 1.0).max(start)));
+            }
+        }
+        None
     }
 
     pub(crate) fn skip_segment(&mut self, cx: &mut Context<Self>) {
@@ -1091,6 +1238,18 @@ impl MediaHubView {
         let next = self.autoplay.take().map(|(_, id)| id).or_else(|| self.next_local_episode().map(|e| e.item.id));
         if let Some(id) = next {
             self.play_item(id, window, cx);
+            return;
+        }
+        // Use presearched streams for the next episode when available
+        if !self.next_ep_streams.is_empty() {
+            let candidates = std::mem::take(&mut self.next_ep_streams);
+            if let Some(ctx) = self.stream_ctx.as_mut() {
+                if let Some((s, e)) = ctx.episode.as_mut() {
+                    *e += 1;
+                    ctx.label = format!("{} S{:02}E{:02}", ctx.label.split(" · ").next().unwrap_or("Episode"), s, e);
+                }
+            }
+            self.start_streams(candidates, window, cx);
         }
     }
 
@@ -1142,7 +1301,12 @@ impl MediaHubView {
         }
         let is_imdb = query.starts_with("tt") && query[2..].chars().all(|c| c.is_ascii_digit());
         if is_imdb && !self.svc.has_tmdb() {
-            self.load_streams(query.clone(), None, StreamContext { label: query, trakt: None }, cx);
+            self.load_streams(
+                query.clone(),
+                None,
+                StreamContext { label: query, trakt: None, imdb: None, episode: None, tvdb_id: None },
+                cx,
+            );
             return;
         }
         self.searching = true;
@@ -1500,17 +1664,47 @@ impl MediaHubView {
     pub(crate) fn trakt_sync(&mut self, cx: &mut Context<Self>) {
         self.busy = Some("Syncing with Trakt…".into());
         cx.notify();
-        let fut = self.svc.trakt_sync();
+        let watched = self.svc.trakt_sync();
+        let watchlist = self.svc.sync_watchlist();
+        cx.spawn(async move |this, cx| {
+            let w = watched.await;
+            let wl = watchlist.await;
+            this.update(cx, |this, cx| {
+                this.busy = None;
+                match (w, wl) {
+                    (Ok(r), Ok(wl)) => {
+                        this.status = Some(format!(
+                            "Trakt: {} watched←, {} watched→ · watchlist +{} / push {}",
+                            r.pulled, r.pushed, wl.added_local, wl.pushed
+                        ));
+                    }
+                    (Ok(r), Err(e)) => this.status = Some(format!("Watched sync ok ({}/{}), watchlist: {e}", r.pulled, r.pushed)),
+                    (Err(e), Ok(wl)) => this.status = Some(format!("Watchlist +{} / push {}; watched: {e}", wl.added_local, wl.pushed)),
+                    (Err(e), Err(e2)) => this.error = Some(format!("{e}; {e2}")),
+                }
+                this.reload(cx);
+                this.load_watchlist(cx);
+                this.load_trakt_lists(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn sync_watchlist_only(&mut self, cx: &mut Context<Self>) {
+        self.busy = Some("Syncing watchlist…".into());
+        cx.notify();
+        let fut = self.svc.sync_watchlist();
         cx.spawn(async move |this, cx| {
             let res = fut.await;
             this.update(cx, |this, cx| {
                 this.busy = None;
                 match res {
-                    Ok(r) => this.status = Some(format!("Trakt sync: {} marked watched, {} sent", r.pulled, r.pushed)),
+                    Ok(r) => this.status = Some(format!("Watchlist: +{} from Trakt, {} pushed", r.added_local, r.pushed)),
                     Err(e) => this.error = Some(e),
                 }
-                this.reload(cx);
-                this.load_trakt_lists(cx);
+                this.load_watchlist(cx);
+                cx.notify();
             })
             .ok();
         })
@@ -1611,10 +1805,11 @@ impl MediaHubView {
             let page = match ks.key.as_str() {
                 "1" => Some(Page::Home),
                 "2" => Some(Page::Library),
-                "3" => Some(Page::Discover),
-                "4" => Some(Page::Calendar),
-                "5" => Some(Page::Player),
-                "6" | "," => Some(Page::Settings),
+                "3" => Some(Page::Watchlist),
+                "4" => Some(Page::Discover),
+                "5" => Some(Page::Calendar),
+                "6" => Some(Page::Player),
+                "7" | "," => Some(Page::Settings),
                 _ => None,
             };
             if let Some(p) = page {

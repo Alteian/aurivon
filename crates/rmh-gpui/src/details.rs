@@ -227,7 +227,14 @@ impl MediaHubView {
         }
         if kind == Some(TitleKind::Movie) {
             if let Some(imdb) = imdb.clone() {
-                let ctx = StreamContext { label: name.clone(), trakt: tmdb_id.map(|t| TraktItem::Movie { tmdb: t as i64 }) };
+                let tvdb = d.details.as_ref().and_then(|x| x.tvdb_id);
+                let ctx = StreamContext {
+                    label: name.clone(),
+                    trakt: tmdb_id.map(|t| TraktItem::Movie { tmdb: t as i64 }),
+                    imdb: Some(imdb.clone()),
+                    episode: None,
+                    tvdb_id: tvdb,
+                };
                 actions = actions.child(
                     self.button("det-streams", "Find streams", local.is_none(), p)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.load_streams(imdb.clone(), None, ctx.clone(), cx))),
@@ -353,7 +360,14 @@ impl MediaHubView {
                                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.play_item(id, window, cx))),
                         );
                 } else if let Some(imdb) = imdb.clone() {
-                    let ctx = StreamContext { label: label.clone(), trakt: Some(TraktItem::Episode { show_tmdb: show as i64, season: s, number: n }) };
+                    let tvdb = d.details.as_ref().and_then(|x| x.tvdb_id);
+                    let ctx = StreamContext {
+                        label: label.clone(),
+                        trakt: Some(TraktItem::Episode { show_tmdb: show as i64, season: s, number: n }),
+                        imdb: Some(imdb.clone()),
+                        episode: Some((s, n)),
+                        tvdb_id: tvdb,
+                    };
                     row = row.child(
                         self.button(SharedString::from(format!("ep-str-{s}-{n}")), "Streams", false, p)
                             .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.load_streams(imdb.clone(), Some((s, n)), ctx.clone(), cx))),

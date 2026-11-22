@@ -153,6 +153,7 @@ pub(crate) struct Page<T> {
 pub struct Details {
     pub title: Title,
     pub imdb_id: Option<String>,
+    pub tvdb_id: Option<i32>,
     pub genres: Vec<String>,
     pub runtime_minutes: Option<i32>,
     pub tagline: Option<String>,
@@ -209,6 +210,8 @@ struct RawDetails {
 #[derive(Deserialize)]
 struct AppendedIds {
     imdb_id: Option<String>,
+    #[serde(default)]
+    tvdb_id: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -409,7 +412,8 @@ impl TmdbClient {
                 original_language: raw.original_language,
                 votes: raw.vote_count,
             },
-            imdb_id: raw.imdb_id.or(raw.external_ids.and_then(|e| e.imdb_id)).filter(|i| !i.is_empty()),
+            imdb_id: raw.imdb_id.or(raw.external_ids.as_ref().and_then(|e| e.imdb_id.clone())).filter(|i| !i.is_empty()),
+            tvdb_id: raw.external_ids.and_then(|e| e.tvdb_id),
             genres: raw.genres.into_iter().map(|g| g.name).collect(),
             runtime_minutes: raw.runtime.or(raw.episode_run_time.first().copied()),
             tagline: raw.tagline.filter(|t| !t.is_empty()),

@@ -152,37 +152,128 @@ impl MediaHubView {
             )
     }
 
-    /// Settings: image cache size and cap
+    /// Settings: unified storage budget
     pub(crate) fn cache_card(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let cap = self.svc.config().image_cache_mb;
-        let used = self.image_cache.unwrap_or_default();
-        let caps: Vec<AnyElement> = CACHE_CAPS_MB
+        let cfg = self.svc.config();
+        let report = self.storage_report.clone().unwrap_or_default();
+        let image_caps: Vec<AnyElement> = CACHE_CAPS_MB
             .iter()
             .map(|mb| {
                 let mb = *mb;
-                self.pill(SharedString::from(format!("cache-cap-{mb}")), if mb >= 1000 { "1 GB".to_string() } else { format!("{mb} MB") }, cap == mb, p)
+                self.pill(SharedString::from(format!("cache-cap-{mb}")), if mb >= 1000 { "1 GB".to_string() } else { format!("{mb} MB") }, cfg.image_cache_mb == mb, p)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                         this.update_config(|c| c.image_cache_mb = mb, false, cx);
-                        this.trim_image_cache(None, cx);
+                        this.prune_storage(cx);
                     }))
                     .into_any_element()
             })
             .collect();
-        self.card(p)
-            .child(self.section_title("Image cache", p))
-            .child(div().text_sm().text_color(rgb(p.muted)).child(format!(
-                "Posters are downloaded only when they scroll into view and kept on disk. Using {:.1} MB in {} files; the least recently used images are removed above the limit (library posters are kept).",
+        const TORRENT_GB: [u32; 5] = [2, 4, 8, 16, 32];
+        let torrent_caps: Vec<AnyElement> = TORRENT_GB
+            .iter()
+            .map(|gb| {
+                let gb = *gb;
+                self.pill(SharedString::from(format!("tor-cap-{gb}")), format!("{gb} GB"), cfg.torrent_cache_gb == gb, p)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        this.update_config(|c| c.torrent_cache_gb = gb, false, cx);
+                        this.prune_storage(cx);
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+        let bucket = |label: &str, used: rmh_app::CacheUsage| {
+            div().text_sm().text_color(rgb(p.muted)).child(format!(
+                "{label}: {:.1} MB · {} files",
                 used.bytes as f64 / 1e6,
                 used.files
+            ))
+        };
+        self.card(p)
+            .child(self.section_title("Storage", p))
+            .child(div().text_sm().text_color(rgb(p.muted)).child(format!(
+                "Total cache {:.1} MB. Caps prune least-recently-used files; torrent orphans are cleaned on startup and when you stop playback.",
+                report.total_bytes() as f64 / 1e6
             )))
-            .child(self.filter_group("Limit", caps, p))
-            .child(div().flex().child(self.button("cache-clear", "Clear image cache", false, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                this.trim_image_cache(Some(0), cx);
-            }))))
+            .child(bucket("Images", report.images))
+            .child(bucket("Torrents", report.torrents))
+            .child(bucket("TMDB metadata", report.tmdb))
+            .child(bucket("Calendar", report.calendar))
+            .child(bucket("Subtitles", report.subtitles))
+            .child(self.filter_group("Image limit", image_caps, p))
+            .child(self.filter_group("Torrent limit", torrent_caps, p))
+            .child(
+                self.toggle_row(
+                    "tg-lowpower",
+                    "Low power mode",
+                    "Skip torrent warm-up until Play; prefer quieter background work",
+                    cfg.low_power,
+                    p,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.update_config(|c| c.low_power = !c.low_power, false, cx))),
+            )
+            .child(
+                self.toggle_row(
+                    "tg-debrid-disk",
+                    "Prefer debrid when disk is full",
+                    "Narrow P2P races when the torrent cache is near its cap",
+                    cfg.prefer_debrid_on_disk_pressure,
+                    p,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                    this.update_config(|c| c.prefer_debrid_on_disk_pressure = !c.prefer_debrid_on_disk_pressure, false, cx)
+                })),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(self.button("storage-prune", "Prune now", true, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.prune_storage(cx))))
+                    .child(self.button("storage-clear-img", "Clear images", false, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                        this.clear_bucket(rmh_app::StorageBucket::Images, cx);
+                    })))
+                    .child(self.button("storage-clear-tor", "Clear torrents", false, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                        this.clear_bucket(rmh_app::StorageBucket::Torrents, cx);
+                    }))),
+            )
     }
 
     pub(crate) fn refresh_cache_usage(&mut self) {
         self.image_cache = Some(self.svc.image_cache_usage());
+        self.storage_report = Some(self.svc.storage_report());
+    }
+
+    pub(crate) fn prune_storage(&mut self, cx: &mut Context<Self>) {
+        let fut = self.svc.prune_all_caches();
+        cx.spawn(async move |this, cx| {
+            let res = fut.await;
+            this.update(cx, |this, cx| {
+                match res {
+                    Ok((n, bytes)) => this.status = Some(format!("Storage: removed {n} files ({:.1} MB)", bytes as f64 / 1e6)),
+                    Err(e) => this.error = Some(e),
+                }
+                this.refresh_cache_usage();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn clear_bucket(&mut self, bucket: rmh_app::StorageBucket, cx: &mut Context<Self>) {
+        let fut = self.svc.clear_storage_bucket(bucket);
+        cx.spawn(async move |this, cx| {
+            let res = fut.await;
+            this.update(cx, |this, cx| {
+                match res {
+                    Ok((n, bytes)) => this.status = Some(format!("{} cleared: {n} files ({:.1} MB)", bucket.label(), bytes as f64 / 1e6)),
+                    Err(e) => this.error = Some(e),
+                }
+                this.refresh_cache_usage();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn trim_image_cache(&mut self, max_mb: Option<u32>, cx: &mut Context<Self>) {

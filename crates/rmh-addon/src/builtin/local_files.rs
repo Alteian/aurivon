@@ -131,6 +131,21 @@ impl LocalFilesAddon {
     }
 
     /// Parse title to extract name and year
+    fn looks_like_episode(path: &str, name: &str) -> bool {
+        let lower = format!("{path}/{name}").to_lowercase();
+        let n = name.to_lowercase();
+        lower.contains("/season")
+            || lower.contains("/series/")
+            || lower.contains("/tv/")
+            || lower.contains("/shows/")
+            || n.contains("s0") && n.contains('e')
+            || n.contains("s1") && n.contains('e')
+            || n.contains("s2") && n.contains('e')
+            || n.contains('x') && n.chars().any(|c| c.is_ascii_digit())
+                && regex::Regex::new(r"(?i)\d+x\d+").ok().is_some_and(|re| re.is_match(&n))
+            || regex::Regex::new(r"(?i)s\d{1,2}e\d{1,2}").ok().is_some_and(|re| re.is_match(&n))
+    }
+
     fn parse_title(name: &str) -> (String, Option<u16>) {
         // Try to extract year from title like "Movie Name (2023)" or "Movie.Name.2023"
         let re = regex::Regex::new(r"^(.+?)[\.\s\-_]*\(?(\d{4})\)?[\.\s\-_]*").ok();
@@ -178,9 +193,14 @@ impl CatalogProvider for LocalFilesAddon {
         // Filter and convert to MetaItems
         let metas: Vec<MetaItem> = files
             .into_iter()
-            .filter(|_f| {
-                // TODO: Proper content type detection (movies vs series)
-                matches!(content_type, ContentType::Movie)
+            .filter(|f| {
+                let path = f.path.to_string_lossy();
+                let is_ep = Self::looks_like_episode(&path, &f.name);
+                match content_type {
+                    ContentType::Movie => !is_ep,
+                    ContentType::Series => is_ep,
+                    _ => true,
+                }
             })
             .skip(skip)
             .take(limit)

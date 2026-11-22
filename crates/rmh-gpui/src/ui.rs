@@ -688,6 +688,7 @@ impl Render for MediaHubView {
             let content = match self.page {
                 Page::Home => self.home_page(p, cx),
                 Page::Library => self.library_page(p, cx),
+                Page::Watchlist => self.watchlist_page(p, cx),
                 Page::Discover => self.browse_page(p, window, cx),
                 Page::Calendar => self.calendar_page(p, cx),
                 Page::Details => self.details_page(p, cx),

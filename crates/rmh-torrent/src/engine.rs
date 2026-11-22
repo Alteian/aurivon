@@ -517,21 +517,77 @@ impl TorrentEngine {
         }
     }
 
-    /// Stop a stream and optionally remove the torrent
-    pub async fn stop_stream(&self, stream_id: &str, _delete_files: bool) -> TorrentResult<()> {
-        let mut torrents = self.active_torrents.write().await;
-        
-        if let Some(_active) = torrents.remove(stream_id) {
-            // Unregister from server
-            self.server.unregister_stream(stream_id).await;
-            
-            // The handle will be dropped, pausing the torrent
-            info!("Stopped stream: {}", stream_id);
-            
-            // TODO: If delete_files, remove downloaded data
-        }
+    /// Paths currently used by active torrents (for orphan cleanup)
+    pub async fn active_paths(&self) -> Vec<PathBuf> {
+        let torrents = self.active_torrents.read().await;
+        torrents
+            .values()
+            .flat_map(|a| {
+                [
+                    self.config.download_dir.join(&a.filename),
+                    self.config.download_dir.join(a.info_hash.clone()).join(&a.filename),
+                ]
+            })
+            .collect()
+    }
 
+    pub fn download_dir(&self) -> &PathBuf {
+        &self.config.download_dir
+    }
+
+    /// Stop a stream and optionally remove the torrent + its data
+    pub async fn stop_stream(&self, stream_id: &str, delete_files: bool) -> TorrentResult<()> {
+        if delete_files {
+            self.remove_stream(stream_id).await;
+            return Ok(());
+        }
+        let mut torrents = self.active_torrents.write().await;
+        if let Some(active) = torrents.remove(stream_id) {
+            self.server.unregister_stream(stream_id).await;
+            if let Some(session) = self.session.as_ref() {
+                let _ = session.delete(TorrentIdOrHash::Id(active.handle.id()), false).await;
+            }
+            info!("Stopped stream: {}", stream_id);
+        }
         Ok(())
+    }
+
+    /// Wipe every file under the download dir that is not an active torrent
+    pub async fn cleanup_orphans(&self) -> (u64, u64) {
+        let keep: HashSet<PathBuf> = self.active_paths().await.into_iter().collect();
+        let dir = self.config.download_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut removed = (0u64, 0u64);
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                return removed;
+            };
+            for e in rd.flatten() {
+                let path = e.path();
+                if keep.iter().any(|k| k == &path || k.starts_with(&path) || path.starts_with(k)) {
+                    continue;
+                }
+                let Ok(md) = e.metadata() else { continue };
+                if md.is_dir() {
+                    if let Ok(walker) = std::fs::read_dir(&path) {
+                        for f in walker.flatten() {
+                            if let Ok(m) = f.metadata() {
+                                if std::fs::remove_file(f.path()).is_ok() {
+                                    removed.0 += 1;
+                                    removed.1 += m.len();
+                                }
+                            }
+                        }
+                    }
+                    let _ = std::fs::remove_dir_all(&path);
+                } else if std::fs::remove_file(&path).is_ok() {
+                    removed.0 += 1;
+                    removed.1 += md.len();
+                }
+            }
+            removed
+        })
+        .await
+        .unwrap_or((0, 0))
     }
 
     /// Get all active streams

@@ -188,6 +188,9 @@ pub struct SocialInputs {
     pub simkl_id: Entity<InputState>,
     pub anilist_id: Entity<InputState>,
     pub anilist_token: Entity<InputState>,
+    pub torbox: Entity<InputState>,
+    pub alldebrid: Entity<InputState>,
+    pub addon_url: Entity<InputState>,
 }
 
 pub struct Disc {
@@ -241,6 +244,9 @@ impl Disc {
             simkl_id: input(cx, window, "Simkl client id", opt(&cfg.simkl_client_id), true),
             anilist_id: input(cx, window, "AniList client id", opt(&cfg.anilist_client_id), false),
             anilist_token: input(cx, window, "Paste the AniList token here", String::new(), true),
+            torbox: input(cx, window, "TorBox API key (optional)", opt(&cfg.torbox_api_key), true),
+            alldebrid: input(cx, window, "AllDebrid API key (optional)", opt(&cfg.alldebrid_api_key), true),
+            addon_url: input(cx, window, "https://…/manifest.json", String::new(), false),
         };
         let subs = vec![cx.subscribe_in(&search_input, window, |this: &mut MediaHubView, _, ev: &InputEvent, window, cx| match ev {
             InputEvent::Change => this.on_search_change(cx),
@@ -427,7 +433,12 @@ impl MediaHubView {
             SearchItem::Person(p) => self.open_person(p.card.id, p.card.name.clone(), window, cx),
             SearchItem::Imdb(id) => {
                 self.navigate(Page::Discover, window, cx);
-                self.load_streams(id.clone(), None, crate::view::StreamContext { label: id, trakt: None }, cx);
+                self.load_streams(
+                    id.clone(),
+                    None,
+                    crate::view::StreamContext { label: id, trakt: None, imdb: None, episode: None, tvdb_id: None },
+                    cx,
+                );
             }
         }
         cx.notify();
@@ -1169,7 +1180,15 @@ impl MediaHubView {
         };
         let i = &self.disc.inputs;
         let region = read(&i.region, cx).map(|r| r.to_uppercase()).unwrap_or_else(|| "CZ".into());
-        let (k, u, pw, s, a) = (read(&i.os_key, cx), read(&i.os_user, cx), read(&i.os_pass, cx), read(&i.simkl_id, cx), read(&i.anilist_id, cx));
+        let (k, u, pw, s, a, tb, ad) = (
+            read(&i.os_key, cx),
+            read(&i.os_user, cx),
+            read(&i.os_pass, cx),
+            read(&i.simkl_id, cx),
+            read(&i.anilist_id, cx),
+            read(&i.torbox, cx),
+            read(&i.alldebrid, cx),
+        );
         self.update_config(
             move |c| {
                 c.region = region;
@@ -1178,6 +1197,8 @@ impl MediaHubView {
                 c.opensubtitles_password = pw;
                 c.simkl_client_id = s;
                 c.anilist_client_id = a;
+                c.torbox_api_key = tb;
+                c.alldebrid_api_key = ad;
             },
             false,
             cx,

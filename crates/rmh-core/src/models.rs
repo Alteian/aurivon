@@ -30,13 +30,14 @@ impl MediaItem {
     /// Create a new media item from a scanned file
     pub fn from_scan(file_path: String, file_name: String, file_size: i64) -> Self {
         let now = Utc::now();
+        let media_type = Self::detect_type(&file_path, &file_name);
         Self {
             id: Uuid::new_v4(),
             title: Self::extract_title(&file_name),
             file_path,
             file_name,
             file_size,
-            media_type: MediaType::Movie, // Default, can be refined later
+            media_type,
             poster_url: None,
             backdrop_url: None,
             overview: None,
@@ -48,6 +49,32 @@ impl MediaItem {
             tmdb_id: None,
             created_at: now,
             updated_at: now,
+        }
+    }
+
+    /// Guess movie vs episode from path / filename (SxxExx, 1x02, Season folders)
+    pub fn detect_type(file_path: &str, file_name: &str) -> MediaType {
+        let lower = format!("{file_path}/{file_name}").to_lowercase();
+        let name = file_name.to_lowercase();
+        // Audio-only extensions stay as music when obvious; scanner already separates
+        // audio vs video via extension lists — default video episodes/movies here.
+        let episode = [
+            "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9",
+        ]
+        .iter()
+        .any(|s| name.contains(&format!("{s}e")))
+            || name.contains("e0") && (name.contains("s0") || name.contains("s1") || name.contains("s2"))
+            || regex_simple_episode(&name)
+            || lower.contains("/season ")
+            || lower.contains("/season_")
+            || lower.contains("/seasons/")
+            || lower.contains("/series/")
+            || lower.contains("/tv/")
+            || lower.contains("/shows/");
+        if episode {
+            MediaType::Episode
+        } else {
+            MediaType::Movie
         }
     }
 
@@ -69,6 +96,30 @@ impl MediaItem {
         // This is a simple heuristic; metadata fetch will get the real title
         title.trim().to_string()
     }
+}
+
+/// `1x02`, `s01e02`, `s1e2` without pulling in a regex crate
+fn regex_simple_episode(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    for i in 0..bytes.len().saturating_sub(3) {
+        if bytes[i] == b's' {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > i + 1 && j < bytes.len() && bytes[j] == b'e' {
+                let k = j + 1;
+                if k < bytes.len() && bytes[k].is_ascii_digit() {
+                    return true;
+                }
+            }
+        }
+        // 1x02
+        if bytes[i].is_ascii_digit() && i + 2 < bytes.len() && bytes[i + 1] == b'x' && bytes[i + 2].is_ascii_digit() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Type of media content
