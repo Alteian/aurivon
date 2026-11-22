@@ -5,6 +5,9 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+### Fixed
+- Windows release build: wrap `CreateSolidBrush` in `unsafe` for current `windows` crate
+
 ## [0.9.1] - 2026-11-23
 
 ### Added

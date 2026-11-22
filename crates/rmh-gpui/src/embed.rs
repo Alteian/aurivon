@@ -137,13 +137,15 @@ mod platform {
         static mut OK: bool = false;
         ONCE.call_once(|| {
             let class: Vec<u16> = CLASS.encode_utf16().chain(std::iter::once(0)).collect();
-            let wc = WNDCLASSEXW {
-                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-                style: CS_OWNDC | CS_HREDRAW | CS_VREDRAW,
-                lpfnWndProc: Some(wnd_proc),
-                hbrBackground: HBRUSH(CreateSolidBrush(windows::Win32::Foundation::COLORREF(0)).0),
-                lpszClassName: PCWSTR(class.as_ptr()),
-                ..Default::default()
+            let wc = unsafe {
+                WNDCLASSEXW {
+                    cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                    style: CS_OWNDC | CS_HREDRAW | CS_VREDRAW,
+                    lpfnWndProc: Some(wnd_proc),
+                    hbrBackground: HBRUSH(CreateSolidBrush(windows::Win32::Foundation::COLORREF(0)).0),
+                    lpszClassName: PCWSTR(class.as_ptr()),
+                    ..Default::default()
+                }
             };
             unsafe {
                 // ATOM is a u16 alias in recent `windows` crates
