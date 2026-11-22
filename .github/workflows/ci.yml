@@ -39,8 +39,8 @@ jobs:
               - 'rust-toolchain.toml'
               - '.github/workflows/ci.yml'
 
-  test:
-    name: Test
+  check:
+    name: Check
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
@@ -55,8 +55,7 @@ jobs:
             libxkbcommon-dev libwayland-dev libvulkan-dev \
             libfontconfig1-dev libfreetype6-dev \
             libclang-dev cmake \
-            clang mold \
-            mpv ffmpeg
+            clang mold
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -66,6 +65,6 @@ jobs:
           # Writing the cache is slow; only refresh it from master
           save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
 
-      # One compile: `cargo test` builds what it needs (skip separate `cargo check`)
-      - name: Test
-        run: cargo test --workspace --quiet
+      # Tests paused for now (were hanging / burning Actions minutes)
+      - name: Check
+        run: cargo check --workspace

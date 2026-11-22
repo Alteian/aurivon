@@ -12,7 +12,7 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 - mpv IPC over Windows named pipes (playback no longer Linux-only)
 
 ### Changed
-- CI uses fewer Actions minutes: no release tarball on every push (only on tags / manual dispatch), one `cargo test` instead of check+test, mold linker, cache writes only from master
+- CI uses fewer Actions minutes: no release tarball on every push (only on tags / manual dispatch), mold linker, cache writes only from master; workspace tests paused (`cargo check` only)
 - Updater picks OS-specific assets (Linux `.tar.gz` / Windows `.zip`) and activates `current` with a junction on Windows
 
 ## [0.6.0] - 2026-11-22
