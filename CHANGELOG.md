@@ -5,6 +5,8 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-23
+
 ### Fixed
 - Linux CI/release link: install `libxcb1-dev` + `libxkbcommon-x11-dev` so mold can resolve `-lxcb` / `-lxkbcommon-x11`
 
