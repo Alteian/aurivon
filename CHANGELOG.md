@@ -5,6 +5,8 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-23
+
 ### Added
 - Built-in Trakt public client id (PKCE); optional client-id override on Addons
 - `aurivon --repair-db` and Settings → Storage → **Repair library database** (checksum fix; if still unusable, backs up and recreates an empty library DB)
