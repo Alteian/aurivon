@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Cut a release: bump the semver version, update CHANGELOG.md, tag, build,
-# package and publish a GitHub release that installed apps update from.
+# Cut a release: bump the semver version, update CHANGELOG.md, tag, and publish
+# a GitHub release. The Linux install tarball is built by GitHub Actions on the
+# tag (.github/workflows/release.yml) and attached to the same release.
 #
 #   scripts/release.sh <major|minor|patch> [--pre <id>] [--skip-tests] [--dry-run]
+#                      [--with-local-package]   also upload a tarball built here
 #
 #   patch      0.2.0 -> 0.2.1      bug fixes
 #   minor      0.2.1 -> 0.3.0      new features
@@ -22,16 +24,17 @@ REPO_SLUG=$(sed -n 's/^pub const REPO: &str = "\(.*\)";/\1/p' crates/rmh-app/src
 [ -n "$REPO_SLUG" ] || { echo "could not read REPO from crates/rmh-app/src/update.rs" >&2; exit 1; }
 
 BUMP="${1:-}"; shift || true
-PRE=""; SKIP_TESTS=0; DRY=0
+PRE=""; SKIP_TESTS=0; DRY=0; LOCAL_PKG=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --pre) PRE="$2"; shift 2 ;;
         --skip-tests) SKIP_TESTS=1; shift ;;
         --dry-run) DRY=1; shift ;;
+        --with-local-package) LOCAL_PKG=1; shift ;;
         *) echo "unknown option $1" >&2; exit 2 ;;
     esac
 done
-case "$BUMP" in major|minor|patch) ;; *) sed -n '2,20p' "$0"; exit 2 ;; esac
+case "$BUMP" in major|minor|patch) ;; *) sed -n '2,22p' "$0"; exit 2 ;; esac
 
 [ -z "$(git status --porcelain --untracked-files=no)" ] || { echo "working tree has uncommitted changes" >&2; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "gh is not logged in (gh auth login)" >&2; exit 1; }
@@ -88,8 +91,12 @@ awk -v sec="$SECTION" '
 rm -f "$SECTION"
 
 [ $SKIP_TESTS -eq 1 ] || cargo test --workspace --quiet
-TARBALL=$(scripts/package.sh | tail -n 1)
-SUMFILE="$TARBALL.sha256"
+
+ASSETS=()
+if [ $LOCAL_PKG -eq 1 ]; then
+    TARBALL=$(scripts/package.sh | tail -n 1)
+    ASSETS+=("$TARBALL" "$TARBALL.sha256")
+fi
 
 git add Cargo.toml Cargo.lock CHANGELOG.md
 git commit -q -m "release: $TAG"
@@ -99,9 +106,11 @@ git push -q origin "HEAD:refs/heads/$BRANCH"
 git push -q origin "$TAG"
 
 PRE_FLAG=(); [[ "$NEW" == *-* ]] && PRE_FLAG=(--prerelease)
-gh release create "$TAG" "$TARBALL" "$SUMFILE" \
+# Notes + empty release first; Actions (or --with-local-package) attach the tarball
+gh release create "$TAG" "${ASSETS[@]}" \
     --repo "$REPO_SLUG" \
     --title "Aurivon $NEW" \
     --notes-file "$NOTES" \
     --verify-tag "${PRE_FLAG[@]}"
 echo "Released $TAG: $(gh release view "$TAG" --repo "$REPO_SLUG" --json url -q .url)"
+echo "Linux package: GitHub Actions Release workflow attaches aurivon-*-x86_64-linux.tar.gz"

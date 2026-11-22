@@ -1,9 +1,9 @@
 //! Self-update from GitHub releases, versioned with semver.
 //!
-//! Releases are made by `scripts/release.sh` and carry two assets per platform:
-//! `aurivon-<version>-<arch>-linux.tar.gz` and a matching `.sha256`.
-//! The repository is private, so requests are authenticated with a GitHub token
-//! taken (in order) from `RMH_GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN`,
+//! Releases are cut by `scripts/release.sh`; CI (`.github/workflows/release.yml`)
+//! attaches `aurivon-<version>-<arch>-linux.tar.gz` and a matching `.sha256`.
+//! Public releases work without auth. An optional GitHub token (for rate limits)
+//! is taken from `RMH_GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN`,
 //! `~/.config/aurivon/github_token`, or `gh auth token`. Tokens are never
 //! logged or stored by the app.
 //!
@@ -219,7 +219,8 @@ pub async fn check(include_pre: bool) -> anyhow::Result<UpdateCheck> {
     match resp.status().as_u16() {
         200 => {}
         401 | 403 | 404 if token.is_none() => anyhow::bail!(
-            "The release repository is private: sign in with `gh auth login` or put a GitHub token in ~/.config/aurivon/github_token"
+            "Could not list GitHub releases (HTTP {}). If rate-limited, sign in with `gh auth login` or put a token in ~/.config/aurivon/github_token",
+            resp.status().as_u16()
         ),
         401 => anyhow::bail!("GitHub rejected the token (401): run `gh auth login` again"),
         s => anyhow::bail!("GitHub releases request failed: HTTP {s}"),

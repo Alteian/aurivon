@@ -202,9 +202,21 @@ Application data is stored in:
 
 ## Install & updates
 
+**From a GitHub Release (recommended):** each `v*` tag builds
+`aurivon-<version>-x86_64-linux.tar.gz` in CI. Download it (and the `.sha256`), then:
+
+```bash
+tar xzf aurivon-*-x86_64-linux.tar.gz
+cd aurivon-*
+./install.sh          # ~/.local — launcher entry, icons, no root
+```
+
+**From a checkout:**
+
 ```bash
 make install        # release build -> ~/.local, app launcher entry + icons
 make uninstall      # remove (library/settings kept; scripts/uninstall.sh --purge removes them)
+make package        # dist/aurivon-<version>-<arch>-linux.tar.gz + .sha256
 ```
 
 - The app appears in the app launcher (COSMIC launcher / app library, GNOME, KDE) as
@@ -220,10 +232,10 @@ make uninstall      # remove (library/settings kept; scripts/uninstall.sh --purg
   and caches from the old `rustmediahub` folders to `aurivon` and removes the old launcher entry.
 
 **Updates.** Releases are GitHub releases tagged `vMAJOR.MINOR.PATCH` with a tarball and
-its sha256. The app checks on startup and every 6 hours (Settings → Updates), shows
-*Update available* with the changelog, downloads, verifies the checksum, installs the new
-version next to the old one, switches atomically and offers a restart. Pre-releases
-(`0.3.0-beta.1`) are only offered when opted in. From a terminal:
+its sha256 (built by `.github/workflows/release.yml`). The app checks on startup and every
+6 hours (Settings → Updates), shows *Update available* with the changelog, downloads,
+verifies the checksum, installs the new version next to the old one, switches atomically
+and offers a restart. Pre-releases (`0.3.0-beta.1`) are only offered when opted in:
 
 ```bash
 aurivon --version
@@ -231,9 +243,8 @@ aurivon --check-update     # add --pre to include pre-releases
 aurivon --update
 ```
 
-The repository is private, so the updater authenticates with your GitHub login:
-`gh auth token` (be logged in with `gh auth login`), or a token in
-`RMH_GITHUB_TOKEN` / `~/.config/aurivon/github_token`. No token is stored by the app.
+Public releases need no GitHub token. A token (`gh auth login`, `RMH_GITHUB_TOKEN`, or
+`~/.config/aurivon/github_token`) is only useful for higher API rate limits.
 
 **Releasing.** From a clean tree (normally on `master`):
 
@@ -242,12 +253,13 @@ scripts/release.sh patch            # 0.2.0 -> 0.2.1   fixes
 scripts/release.sh minor            # 0.2.1 -> 0.3.0   features
 scripts/release.sh major            # 0.3.0 -> 1.0.0   breaking
 scripts/release.sh minor --pre beta # 0.3.0-beta.1 (pre-release)
+# optional: also upload a locally built tarball
+scripts/release.sh patch --with-local-package
 ```
 
-It bumps the version in `Cargo.toml`, moves the *Unreleased* notes in `CHANGELOG.md`
-into the new version (or uses commit subjects), runs the tests, builds and packages
-`dist/aurivon-<v>-x86_64-linux.tar.gz` + `.sha256`, commits, tags, pushes and runs
-`gh release create`. Installed apps pick it up on their next check.
+It bumps `Cargo.toml`, moves *Unreleased* notes into the new version, tests, commits,
+tags, pushes and creates the GitHub release. CI then attaches
+`aurivon-<v>-x86_64-linux.tar.gz` + `.sha256`. Installed apps pick it up on their next check.
 
 ## Usage
 

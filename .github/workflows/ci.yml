@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main, feat/**]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: Check & test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev \
+            libxkbcommon-dev libwayland-dev libvulkan-dev \
+            libclang-dev cmake \
+            mpv ffmpeg
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-x86_64
+
+      - name: Check
+        run: cargo check --workspace
+
+      - name: Test
+        run: cargo test --workspace
+
+  package:
+    name: Package Linux tarball
+    runs-on: ubuntu-24.04
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev \
+            libxkbcommon-dev libwayland-dev libvulkan-dev \
+            libclang-dev cmake
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-x86_64
+
+      - name: Build package
+        run: |
+          TAR=$(./scripts/package.sh | tee /dev/stderr | tail -n 1)
+          echo "TAR=$TAR" >> "$GITHUB_ENV"
+          echo "SUM=${TAR}.sha256" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aurivon-linux-x86_64
+          path: |
+            ${{ env.TAR }}
+            ${{ env.SUM }}
+          if-no-files-found: error

@@ -6,6 +6,7 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 ## [Unreleased]
 
 ### Added
+- GitHub Actions CI (check/test + Linux tarball artifact) and Release workflow that attaches `aurivon-*-x86_64-linux.tar.gz` to `v*` tags; `./install.sh` inside the archive is the user installer
 - Settings → Storage: usage by images / torrents / TMDB / calendar / subtitles, image + torrent caps, prune/clear, low-power mode, prefer-debrid-when-disk-full
 - Torrent orphan cleanup on startup and engine init; `stop_stream` can delete data; configurable torrent cache size
 - Watchlist page (nav ★ / Ctrl+3) with bi-directional Trakt sync; local remove also removes on Trakt; single Home watchlist row

@@ -1,0 +1,73 @@
+name: Release
+
+# Builds the Linux install tarball and attaches it to the GitHub release for tag v*.
+# Cut a release with scripts/release.sh (version bump + tag + notes), or push a tag
+# manually; this workflow supplies the binary package users download.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to package (e.g. v0.5.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package-linux:
+    name: Linux x86_64 package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev \
+            libxkbcommon-dev libwayland-dev libvulkan-dev \
+            libclang-dev cmake
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-x86_64-release
+
+      - name: Build package
+        id: pkg
+        run: |
+          TAR=$(./scripts/package.sh | tee /dev/stderr | tail -n 1)
+          SUM="${TAR}.sha256"
+          test -f "$TAR" && test -f "$SUM"
+          echo "tar=$TAR" >> "$GITHUB_OUTPUT"
+          echo "sum=$SUM" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$TAR")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          TAR="${{ steps.pkg.outputs.tar }}"
+          SUM="${{ steps.pkg.outputs.sum }}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # Replace CI assets if re-run; leave other files alone
+            gh release upload "$TAG" "$TAR" "$SUM" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" "$TAR" "$SUM" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Aurivon ${TAG#v}" \
+              --generate-notes \
+              --verify-tag
+          fi
+          echo "Release: $(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url -q .url)"
