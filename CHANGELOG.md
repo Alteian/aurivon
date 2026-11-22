@@ -5,6 +5,8 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-22
+
 ### Added
 - Windows release: Inno Setup installer (`*-windows-setup.exe`) with bundled mpv, portable zip for the in-app updater, Win32 HWND embedded video
 - mpv IPC over Windows named pipes (playback no longer Linux-only)
