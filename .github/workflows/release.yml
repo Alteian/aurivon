@@ -1,9 +1,7 @@
 name: Release
 
-# Builds the Linux install tarball and attaches it to the GitHub release for tag v*.
-# Cut a release with scripts/release.sh (version bump + tag + notes), or push a tag
-# manually; this workflow supplies the binary package users download.
-# Only runs on tags / manual dispatch — not on every CI push.
+# Builds Linux + Windows install packages and attaches them to the GitHub release
+# for tag v*. Cut a release with scripts/release.sh, or workflow_dispatch an existing tag.
 
 on:
   push:
@@ -11,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to package (e.g. v0.5.0)"
+        description: "Existing tag to package (e.g. v0.6.0)"
         required: true
 
 permissions:
@@ -20,12 +18,13 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
 jobs:
   package-linux:
     name: Linux x86_64 package
     runs-on: ubuntu-24.04
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -51,7 +50,6 @@ jobs:
       - name: Build package
         run: |
           set -euo pipefail
-          # Keep cargo noise on stderr; only the final path is on stdout.
           TAR=$(./scripts/package.sh | tail -n 1)
           SUM="${TAR}.sha256"
           test -f "$TAR"
@@ -81,3 +79,58 @@ jobs:
               --verify-tag
           fi
           echo "Release: $(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url -q .url)"
+
+  package-windows:
+    name: Windows x86_64 package
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-x86_64-release
+          save-if: true
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build zip + Setup installer (bundles mpv)
+        shell: pwsh
+        run: |
+          ./scripts/package-windows.ps1
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          # workspace.package version is under [workspace.package]; package script already used it
+          $zip = Get-ChildItem dist/aurivon-*-x86_64-windows.zip | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $setup = Get-ChildItem dist/aurivon-*-x86_64-windows-setup.exe -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $zip) { throw "zip not produced" }
+          if (-not $setup) { throw "setup.exe not produced (is Inno Setup installed?)" }
+          "AURIVON_ZIP=$($zip.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "AURIVON_ZIP_SUM=$($zip.FullName).sha256" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "AURIVON_SETUP=$($setup.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "AURIVON_SETUP_SUM=$($setup.FullName).sha256" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "zip=$($zip.FullName)"
+          Write-Host "setup=$($setup.FullName)"
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($f in @($env:AURIVON_ZIP, $env:AURIVON_ZIP_SUM, $env:AURIVON_SETUP, $env:AURIVON_SETUP_SUM)) {
+            if (-not (Test-Path $f)) { throw "missing $f" }
+          }
+          $exists = $true
+          try { gh release view $env:TAG --repo $env:GITHUB_REPOSITORY | Out-Null } catch { $exists = $false }
+          $files = @($env:AURIVON_ZIP, $env:AURIVON_ZIP_SUM, $env:AURIVON_SETUP, $env:AURIVON_SETUP_SUM)
+          if ($exists) {
+            gh release upload $env:TAG @files --repo $env:GITHUB_REPOSITORY --clobber
+          } else {
+            gh release create $env:TAG @files --repo $env:GITHUB_REPOSITORY --title "Aurivon $($env:TAG.TrimStart('v'))" --generate-notes --verify-tag
+          }
+          gh release view $env:TAG --repo $env:GITHUB_REPOSITORY --json url -q .url

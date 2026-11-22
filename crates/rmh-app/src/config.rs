@@ -275,14 +275,24 @@ fn yes() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum VideoMode {
     /// mpv draws into a surface inside the app window (X11 / XWayland)
-    #[default]
     Embedded,
     /// mpv opens its own window with its full on-screen controller
     Window,
+}
+
+impl Default for VideoMode {
+    fn default() -> Self {
+        // Embedded needs X11; Windows (and other non-Linux) use a separate mpv window.
+        if cfg!(target_os = "linux") {
+            Self::Embedded
+        } else {
+            Self::Window
+        }
+    }
 }
 
 impl Default for AppConfig {
@@ -460,7 +470,27 @@ impl AppConfig {
     }
 
     pub fn mpv_path(&self) -> String {
-        self.mpv_path.clone().filter(|p| !p.trim().is_empty()).unwrap_or_else(|| "mpv".to_string())
+        if let Some(p) = self.mpv_path.clone().filter(|p| !p.trim().is_empty()) {
+            return p;
+        }
+        // Windows installer / portable zip ships mpv next to aurivon.exe
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let bundled = dir.join("mpv").join(if cfg!(windows) { "mpv.exe" } else { "mpv" });
+                if bundled.is_file() {
+                    return bundled.to_string_lossy().into_owned();
+                }
+                let beside = dir.join(if cfg!(windows) { "mpv.exe" } else { "mpv" });
+                if beside.is_file() {
+                    return beside.to_string_lossy().into_owned();
+                }
+            }
+        }
+        if cfg!(windows) {
+            "mpv.exe".into()
+        } else {
+            "mpv".into()
+        }
     }
 
     /// `~/.config/aurivon/.env`: API keys for the installed app (chmod 600)

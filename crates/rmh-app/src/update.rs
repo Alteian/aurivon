@@ -7,14 +7,15 @@
 //! `GITHUB_TOKEN`, `~/.config/aurivon/github_token`, or `gh auth token`.
 //! Tokens are never logged or stored by the app.
 //!
-//! Installed layout (see `scripts/install.sh`):
+//! Installed layout:
 //! ```text
-//! ~/.local/share/aurivon/app/versions/<version>/aurivon
-//! ~/.local/share/aurivon/app/current -> versions/<version>
-//! ~/.local/bin/aurivon            (launcher wrapper)
+//! <data>/aurivon/app/versions/<version>/aurivon[.exe]   (+ mpv/ on Windows)
+//! <data>/aurivon/app/current -> versions/<version>      (symlink / junction)
+//! Linux also: ~/.local/bin/aurivon                      (launcher wrapper)
 //! ```
-//! An update unpacks the new version next to the old one, checks it runs, and
-//! swaps the `current` symlink atomically, so a failed update never breaks the app.
+//! Friends on Windows use the Setup installer first; in-app updates download the
+//! portable zip into `versions/` and flip `current`. A failed update never
+//! replaces `current` until the new binary self-checks.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -70,21 +71,37 @@ pub fn installed_root() -> Option<PathBuf> {
     (versions.file_name()? == "versions" && versions.parent()? == root).then_some(root)
 }
 
-/// The launcher wrapper (`~/.local/bin/aurivon`) or the installed binary
-pub fn launcher_path() -> Option<PathBuf> {
-    let wrapper = dirs::home_dir()?.join(".local/bin/aurivon");
-    if wrapper.exists() {
-        return Some(wrapper);
+fn binary_name() -> &'static str {
+    if cfg!(windows) {
+        "aurivon.exe"
+    } else {
+        "aurivon"
     }
-    installed_root().map(|r| r.join("current").join("aurivon"))
+}
+
+/// The launcher wrapper (`~/.local/bin/aurivon` on Linux) or the installed binary
+pub fn launcher_path() -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        let wrapper = dirs::home_dir()?.join(".local/bin/aurivon");
+        if wrapper.exists() {
+            return Some(wrapper);
+        }
+    }
+    installed_root().map(|r| r.join("current").join(binary_name()))
 }
 
 fn arch() -> &'static str {
     std::env::consts::ARCH
 }
 
+/// Release asset the running OS expects (Linux tarball / Windows zip for updater).
 pub fn asset_name(version: &Version) -> String {
-    format!("aurivon-{version}-{}-linux.tar.gz", arch())
+    if cfg!(windows) {
+        format!("aurivon-{version}-x86_64-windows.zip")
+    } else {
+        format!("aurivon-{version}-{}-linux.tar.gz", arch())
+    }
 }
 
 /// Optional GitHub token (rate limits / private forks); never logged
@@ -279,7 +296,9 @@ pub fn sha256_hex(data: &[u8]) -> String {
 /// Returns the path to start the new version with.
 pub async fn install(rel: &ReleaseInfo) -> anyhow::Result<PathBuf> {
     let root = installed_root().ok_or_else(|| {
-        anyhow::anyhow!("This copy is not installed (it runs from a build folder). Install it with `make install` first.")
+        anyhow::anyhow!(
+            "This copy is not installed (it runs from a build folder). Install it first (Linux: `make install` / Windows: the Setup installer)."
+        )
     })?;
     let token = github_token();
     let sha_url = rel.sha_url.as_deref().ok_or_else(|| anyhow::anyhow!("release {} has no checksum file", rel.tag))?;
@@ -297,26 +316,35 @@ pub async fn install(rel: &ReleaseInfo) -> anyhow::Result<PathBuf> {
     let version = rel.version.to_string();
     let root2 = root.clone();
     tokio::task::spawn_blocking(move || install_archive(&root2, &version, &data)).await??;
-    Ok(root.join("current").join("aurivon"))
+    Ok(root.join("current").join(binary_name()))
 }
 
-/// Unpack a verified tarball as `<root>/versions/<version>` and activate it
-pub fn install_archive(root: &Path, version: &str, tarball: &[u8]) -> anyhow::Result<()> {
+fn unpack_release(staging: &Path, data: &[u8]) -> anyhow::Result<()> {
+    // Zip (Windows) starts with PK; gzip tarball starts with 1f 8b
+    if data.len() >= 2 && data[0] == b'P' && data[1] == b'K' {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(data))?;
+        archive.extract(staging)?;
+    } else {
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(data));
+        archive.unpack(staging)?;
+    }
+    Ok(())
+}
+
+/// Unpack a verified release archive as `<root>/versions/<version>` and activate it
+pub fn install_archive(root: &Path, version: &str, archive_bytes: &[u8]) -> anyhow::Result<()> {
     let versions = root.join("versions");
     std::fs::create_dir_all(&versions)?;
     let staging = versions.join(format!(".staging-{version}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging)?;
     let result = (|| -> anyhow::Result<()> {
-        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(tarball));
-        // `unpack` refuses entries that would escape the target directory
-        archive.unpack(&staging)?;
+        unpack_release(&staging, archive_bytes)?;
         let dir = staging.join(format!("aurivon-{version}"));
-        let exe = dir.join("aurivon");
+        let exe = dir.join(binary_name());
         if !exe.is_file() {
-            anyhow::bail!("archive does not contain aurivon-{version}/aurivon");
+            anyhow::bail!("archive does not contain aurivon-{version}/{}", binary_name());
         }
-        // the new binary must run and report the expected version
         let out = Command::new(&exe).arg("--version").output()?;
         let reported = String::from_utf8_lossy(&out.stdout);
         if !out.status.success() || !reported.contains(version) {
@@ -332,10 +360,12 @@ pub fn install_archive(root: &Path, version: &str, tarball: &[u8]) -> anyhow::Re
         }
         std::fs::rename(&dir, &target)?;
         activate(root, version)?;
-        // refresh launcher entry / icons shipped with the new version (best effort)
-        let script = target.join("install.sh");
-        if script.is_file() {
-            let _ = Command::new("sh").arg(&script).arg("--integrate").output();
+        #[cfg(unix)]
+        {
+            let script = target.join("install.sh");
+            if script.is_file() {
+                let _ = Command::new("sh").arg(&script).arg("--integrate").output();
+            }
         }
         prune(root, version, running.as_deref());
         Ok(())
@@ -344,12 +374,55 @@ pub fn install_archive(root: &Path, version: &str, tarball: &[u8]) -> anyhow::Re
     result
 }
 
-/// Atomically point `<root>/current` at `versions/<version>`
+/// Point `<root>/current` at `versions/<version>` (symlink on Unix, junction on Windows)
 pub fn activate(root: &Path, version: &str) -> anyhow::Result<()> {
-    let tmp = root.join(format!(".current-{}", std::process::id()));
-    let _ = std::fs::remove_file(&tmp);
-    std::os::unix::fs::symlink(Path::new("versions").join(version), &tmp)?;
-    std::fs::rename(&tmp, root.join("current"))?;
+    let current = root.join("current");
+    let target = Path::new("versions").join(version);
+    #[cfg(unix)]
+    {
+        let tmp = root.join(format!(".current-{}", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        std::os::unix::fs::symlink(&target, &tmp)?;
+        std::fs::rename(&tmp, &current)?;
+    }
+    #[cfg(windows)]
+    {
+        // Replace any previous current (symlink, junction, or directory)
+        if current.exists() || current.symlink_metadata().is_ok() {
+            let _ = std::fs::remove_dir_all(&current);
+            let _ = std::fs::remove_file(&current);
+        }
+        let abs = root.join(&target);
+        let status = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&current)
+            .arg(&abs)
+            .status()?;
+        if !status.success() {
+            // Fallback: copy tree if junctions are blocked
+            copy_dir_all(&abs, &current)?;
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (current, target);
+        anyhow::bail!("updates are not supported on this platform");
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn copy_dir_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&entry.path(), &to)?;
+        } else {
+            std::fs::copy(entry.path(), to)?;
+        }
+    }
     Ok(())
 }
 
