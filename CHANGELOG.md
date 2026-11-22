@@ -5,6 +5,12 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+### Fixed
+- First installable build of the 0.8.0 feature set: Linux/Windows packages (v0.8.0’s release job failed linking without `libxcb` / `libxkbcommon-x11`)
+
+### Changed
+- Ships on top of 0.8.0 with Trakt PKCE (no `client_secret`) and the CI linker deps from 0.7.1
+
 ## [0.8.0] - 2026-11-22
 
 ### Added
