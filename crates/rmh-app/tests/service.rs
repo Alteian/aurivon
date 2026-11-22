@@ -14,7 +14,7 @@ fn library_lifecycle_through_service() {
     File::create(media.join("Some.Film.2021.mkv")).unwrap();
     File::create(media.join("song.flac")).unwrap();
 
-    let cfg = AppConfig { tmdb_api_key: None, real_debrid_api_key: None, trakt_client_id: None, trakt_client_secret: None, ..AppConfig::default() };
+    let cfg = AppConfig { tmdb_api_key: None, real_debrid_api_key: None, trakt_client_id: None, ..AppConfig::default() };
     let svc = MediaService::with_paths(dir.path().join("lib.db"), cfg).unwrap();
 
     assert!(block_on(svc.add_library("/definitely/missing")).is_err());
@@ -54,7 +54,7 @@ fn seek_thumbnails_are_cached_per_bucket() {
         eprintln!("ffmpeg not available, skipping");
         return;
     }
-    let cfg = AppConfig { tmdb_api_key: None, real_debrid_api_key: None, trakt_client_id: None, trakt_client_secret: None, ..AppConfig::default() };
+    let cfg = AppConfig { tmdb_api_key: None, real_debrid_api_key: None, trakt_client_id: None, ..AppConfig::default() };
     let svc = MediaService::with_paths(dir.path().join("lib.db"), cfg).unwrap();
     let src = clip.to_string_lossy().to_string();
     let a = block_on(svc.thumbnail(src.clone(), 6.2)).unwrap();

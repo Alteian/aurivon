@@ -3,15 +3,15 @@
 use crate::catalog::LibraryEntry;
 use crate::service::{MediaService, ServiceResult};
 use rmh_database::MediaRepository;
-use rmh_trakt::{DeviceCode, Entry, Item, ScrobbleAction, TraktClient};
+use rmh_trakt::{Entry, Item, PkceLogin, ScrobbleAction, TraktClient};
 use std::future::Future;
 use tracing::{info, warn};
 
-pub use rmh_trakt::{DeviceCode as TraktDeviceCode, Entry as TraktEntry, Item as TraktItem, ScrobbleAction as TraktAction};
+pub use rmh_trakt::{Entry as TraktEntry, Item as TraktItem, PkceLogin as TraktPkceLogin, ScrobbleAction as TraktAction};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TraktStatus {
-    /// Client id + secret are configured
+    /// Client id is configured
     pub configured: bool,
     pub logged_in: bool,
     pub username: Option<String>,
@@ -39,7 +39,7 @@ impl MediaService {
             .read()
             .ok()
             .and_then(|t| t.clone())
-            .ok_or_else(|| "Trakt is not set up: add your Trakt client id and secret in Settings.".to_string())
+            .ok_or_else(|| "Trakt is not set up: add your Trakt client id in Settings.".to_string())
     }
 
     pub fn trakt_status(&self) -> impl Future<Output = ServiceResult<TraktStatus>> + 'static {
@@ -52,16 +52,22 @@ impl MediaService {
         })
     }
 
-    /// Step 1 of login: get a code for the user to enter at trakt.tv/activate
-    pub fn trakt_begin_login(&self) -> impl Future<Output = ServiceResult<DeviceCode>> + 'static {
+    /// Step 1: Authorization Code + PKCE. Open [`PkceLogin::auth_url`] in a browser.
+    pub fn trakt_begin_login(&self) -> impl Future<Output = ServiceResult<PkceLogin>> + 'static {
         let client = self.trakt_client();
-        self.run(async move { client?.start_device_login().await.map_err(|e| format!("{e:#}")) })
+        self.run(async move { client?.start_pkce_login().await.map_err(|e| format!("{e:#}")) })
     }
 
-    /// Step 2: wait until the user approves (or the code expires)
-    pub fn trakt_finish_login(&self, code: DeviceCode) -> impl Future<Output = ServiceResult<Option<String>>> + 'static {
+    /// Step 2: wait for the HTTPS callback page to forward the code to the local listener.
+    pub fn trakt_finish_login(&self) -> impl Future<Output = ServiceResult<Option<String>>> + 'static {
         let client = self.trakt_client();
-        self.run(async move { client?.wait_for_device_login(&code).await.map_err(|e| format!("{e:#}")) })
+        self.run(async move { client?.wait_for_pkce_login().await.map_err(|e| format!("{e:#}")) })
+    }
+
+    /// Paste the `code` from the callback page if the automatic forward failed.
+    pub fn trakt_complete_login(&self, code: String) -> impl Future<Output = ServiceResult<Option<String>>> + 'static {
+        let client = self.trakt_client();
+        self.run(async move { client?.complete_pkce_login(&code).await.map_err(|e| format!("{e:#}")) })
     }
 
     pub fn trakt_logout(&self) -> impl Future<Output = ServiceResult<()>> + 'static {

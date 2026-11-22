@@ -23,6 +23,8 @@ case "$OS" in
             mpv \
             ffmpeg \
             libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libxcb1-dev \
             libwayland-dev \
             libvulkan-dev \
             libfontconfig1-dev \
@@ -36,6 +38,8 @@ case "$OS" in
             openssl-devel \
             mpv \
             libxkbcommon-devel \
+            libxkbcommon-x11-devel \
+            libxcb-devel \
             wayland-devel \
             vulkan-loader-devel \
             fontconfig-devel \
@@ -49,6 +53,7 @@ case "$OS" in
             openssl \
             mpv \
             libxkbcommon \
+            libxcb \
             wayland \
             vulkan-icd-loader \
             fontconfig \

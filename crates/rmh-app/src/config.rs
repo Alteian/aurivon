@@ -47,11 +47,9 @@ pub struct AppConfig {
     /// Match local files against TMDB after scanning (posters, details)
     #[serde(default = "yes")]
     pub auto_match: bool,
-    /// Trakt API app credentials (https://trakt.tv/oauth/applications)
+    /// Trakt API app client id (https://trakt.tv/oauth/applications). Public; PKCE, no secret.
     #[serde(default)]
     pub trakt_client_id: Option<String>,
-    #[serde(default)]
-    pub trakt_client_secret: Option<String>,
     /// Scrobble playback to Trakt while watching
     #[serde(default = "yes")]
     pub trakt_scrobble: bool,
@@ -309,7 +307,6 @@ impl Default for AppConfig {
             sub_lang: None,
             auto_match: true,
             trakt_client_id: std::env::var("TRAKT_CLIENT_ID").ok(),
-            trakt_client_secret: std::env::var("TRAKT_CLIENT_SECRET").ok(),
             trakt_scrobble: true,
             home_layout: HomeLayout::default(),
             autoplay_next: true,
@@ -370,9 +367,6 @@ impl AppConfig {
         if config.trakt_client_id.as_deref().unwrap_or("").is_empty() {
             config.trakt_client_id = std::env::var("TRAKT_CLIENT_ID").ok();
         }
-        if config.trakt_client_secret.as_deref().unwrap_or("").is_empty() {
-            config.trakt_client_secret = std::env::var("TRAKT_CLIENT_SECRET").ok();
-        }
         for (field, var) in [
             (&mut config.opensubtitles_api_key, "OPENSUBTITLES_API_KEY"),
             (&mut config.opensubtitles_username, "OPENSUBTITLES_USERNAME"),
@@ -404,11 +398,9 @@ impl AppConfig {
         self.home_rows.iter().any(|r| r == key)
     }
 
-    /// Trakt client id + secret, when both are set
-    pub fn trakt_credentials(&self) -> Option<(String, String)> {
-        let id = self.trakt_client_id.clone().filter(|v| !v.trim().is_empty())?;
-        let secret = self.trakt_client_secret.clone().filter(|v| !v.trim().is_empty())?;
-        Some((id.trim().to_string(), secret.trim().to_string()))
+    /// Trakt client id when set (public client; PKCE login needs no secret)
+    pub fn trakt_id(&self) -> Option<String> {
+        self.trakt_client_id.clone().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
     }
 
     pub fn save(&self) -> Result<()> {

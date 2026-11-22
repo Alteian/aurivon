@@ -43,7 +43,7 @@ pub use rmh_services::opensubtitles::language_name as language_label;
 pub use rmh_services::simkl::Scrobble as SocialScrobble;
 pub use service::{expand_home, is_audio, MediaService, MovieHit, ResolvedStream, ServiceResult, StreamHit};
 pub use session::{format_time, resume_position, NowPlaying, ProgressUpdate, TickOutcome};
-pub use trakt::{SyncReport, TraktAction, TraktDeviceCode, TraktEntry, TraktItem, TraktLists, TraktStatus};
+pub use trakt::{SyncReport, TraktAction, TraktEntry, TraktItem, TraktLists, TraktPkceLogin, TraktStatus};
 
 pub use rmh_core::{Library, MediaItem, MediaType};
 pub use rmh_metadata::{Details, Episode, Title};

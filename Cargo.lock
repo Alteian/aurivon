@@ -7754,11 +7754,14 @@ name = "rmh-trakt"
 version = "0.7.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "dirs 5.0.1",
+ "getrandom 0.2.16",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tracing",
 ]
