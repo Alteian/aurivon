@@ -5,6 +5,9 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+### Changed
+- CI uses fewer Actions minutes: no release tarball on every push (only on tags / manual dispatch), one `cargo test` instead of check+test, mold linker, cache writes only from master
+
 ## [0.6.0] - 2026-11-22
 
 ### Added

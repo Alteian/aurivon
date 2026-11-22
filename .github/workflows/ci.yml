@@ -1,8 +1,11 @@
 name: CI
 
+# Cheap gate: compile + test only. The Linux install tarball is built once per
+# release in release.yml (full --release + LTO), not on every push.
+
 on:
   push:
-    branches: [master, main, feat/**]
+    branches: [master, main]
   pull_request:
 
 concurrency:
@@ -11,7 +14,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
+  # Faster linking than ld.bfd on Ubuntu runners
+  RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
 jobs:
   changes:
@@ -19,7 +25,6 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       code: ${{ steps.filter.outputs.code }}
-      package: ${{ steps.filter.outputs.package }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -33,21 +38,9 @@ jobs:
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
               - '.github/workflows/ci.yml'
-            package:
-              - 'src/**'
-              - 'crates/**'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'rust-toolchain.toml'
-              - 'packaging/**'
-              - 'scripts/package.sh'
-              - 'scripts/install.sh'
-              - 'scripts/uninstall.sh'
-              - '.github/workflows/ci.yml'
-              - '.github/workflows/release.yml'
 
-  check:
-    name: Check & test
+  test:
+    name: Test
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
@@ -62,6 +55,7 @@ jobs:
             libxkbcommon-dev libwayland-dev libvulkan-dev \
             libfontconfig1-dev libfreetype6-dev \
             libclang-dev cmake \
+            clang mold \
             mpv ffmpeg
 
       - uses: dtolnay/rust-toolchain@stable
@@ -69,53 +63,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-x86_64
+          # Writing the cache is slow; only refresh it from master
+          save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
 
-      - name: Check
-        run: cargo check --workspace
-
+      # One compile: `cargo test` builds what it needs (skip separate `cargo check`)
       - name: Test
-        run: cargo test --workspace
-
-  package:
-    name: Package Linux tarball
-    runs-on: ubuntu-24.04
-    needs: [changes, check]
-    # Skip docs-only pushes. packaging/**-only still builds the tarball (check skipped).
-    if: |
-      always()
-      && needs.changes.outputs.package == 'true'
-      && needs.check.result != 'failure'
-      && needs.check.result != 'cancelled'
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev \
-            libxkbcommon-dev libwayland-dev libvulkan-dev \
-            libfontconfig1-dev libfreetype6-dev \
-            libclang-dev cmake
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: linux-x86_64-release
-
-      - name: Build package
-        run: |
-          # package.sh builds only --bin aurivon (not the whole workspace)
-          TAR=$(./scripts/package.sh | tee /dev/stderr | tail -n 1)
-          echo "TAR=$TAR" >> "$GITHUB_ENV"
-          echo "SUM=${TAR}.sha256" >> "$GITHUB_ENV"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: aurivon-linux-x86_64
-          path: |
-            ${{ env.TAR }}
-            ${{ env.SUM }}
-          if-no-files-found: error
+        run: cargo test --workspace --quiet

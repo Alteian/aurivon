@@ -3,6 +3,7 @@ name: Release
 # Builds the Linux install tarball and attaches it to the GitHub release for tag v*.
 # Cut a release with scripts/release.sh (version bump + tag + notes), or push a tag
 # manually; this workflow supplies the binary package users download.
+# Only runs on tags / manual dispatch — not on every CI push.
 
 on:
   push:
@@ -18,6 +19,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
 jobs:
   package-linux:
@@ -35,23 +38,29 @@ jobs:
             build-essential pkg-config libssl-dev \
             libxkbcommon-dev libwayland-dev libvulkan-dev \
             libfontconfig1-dev libfreetype6-dev \
-            libclang-dev cmake
+            libclang-dev cmake \
+            clang mold
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-x86_64-release
+          save-if: true
 
       - name: Build package
-        id: pkg
         run: |
-          TAR=$(./scripts/package.sh | tee /dev/stderr | tail -n 1)
+          set -euo pipefail
+          # Keep cargo noise on stderr; only the final path is on stdout.
+          TAR=$(./scripts/package.sh | tail -n 1)
           SUM="${TAR}.sha256"
-          test -f "$TAR" && test -f "$SUM"
-          echo "tar=$TAR" >> "$GITHUB_OUTPUT"
-          echo "sum=$SUM" >> "$GITHUB_OUTPUT"
-          echo "name=$(basename "$TAR")" >> "$GITHUB_OUTPUT"
+          test -f "$TAR"
+          test -f "$SUM"
+          echo "Built $TAR"
+          {
+            echo "AURIVON_TAR=$TAR"
+            echo "AURIVON_SUM=$SUM"
+          } >> "$GITHUB_ENV"
 
       - name: Upload to GitHub Release
         env:
@@ -59,10 +68,10 @@ jobs:
           TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          TAR="${{ steps.pkg.outputs.tar }}"
-          SUM="${{ steps.pkg.outputs.sum }}"
+          TAR="${AURIVON_TAR:?missing AURIVON_TAR from build step}"
+          SUM="${AURIVON_SUM:?missing AURIVON_SUM from build step}"
+          test -f "$TAR" && test -f "$SUM"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            # Replace CI assets if re-run; leave other files alone
             gh release upload "$TAG" "$TAR" "$SUM" --repo "$GITHUB_REPOSITORY" --clobber
           else
             gh release create "$TAG" "$TAR" "$SUM" \
