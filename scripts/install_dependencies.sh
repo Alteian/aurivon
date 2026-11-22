@@ -24,7 +24,9 @@ case "$OS" in
             ffmpeg \
             libxkbcommon-dev \
             libwayland-dev \
-            libvulkan-dev
+            libvulkan-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev
         ;;
     "Fedora")
         echo "Detected Fedora"
@@ -35,7 +37,9 @@ case "$OS" in
             mpv \
             libxkbcommon-devel \
             wayland-devel \
-            vulkan-loader-devel
+            vulkan-loader-devel \
+            fontconfig-devel \
+            freetype-devel
         ;;
     "Arch Linux")
         echo "Detected Arch Linux"
@@ -46,7 +50,9 @@ case "$OS" in
             mpv \
             libxkbcommon \
             wayland \
-            vulkan-icd-loader
+            vulkan-icd-loader \
+            fontconfig \
+            freetype2
         ;;
     *)
         echo "Unsupported OS: $OS"
