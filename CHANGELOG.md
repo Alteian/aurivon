@@ -5,6 +5,8 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-23
+
 ### Fixed
 - First installable build of the 0.8.0 feature set: Linux/Windows packages (v0.8.0’s release job failed linking without `libxcb` / `libxkbcommon-x11`)
 
