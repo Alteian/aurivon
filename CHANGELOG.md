@@ -5,6 +5,8 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-22
+
 ### Added
 - Streaming-first Home (new default): auto-rotating hero carousel of what's trending (backdrop, rating, overview, ▶ Play best / + Watchlist / Details, ‹ › and ←/→), Continue watching (local + Trakt), Up next, New episodes this week, Trending today / this week, Because you watched…, Popular movies / series, New on streaming, Now in theaters, Top rated, genre rows, Watchlist; the local library is a small row at the bottom (hidden when empty)
 - Rows load only when scrolled into view; small W185 posters; cards grow on hover and show rating / watched / progress; ‹ › row arrows and "See all" into a Browse grid of the whole list
