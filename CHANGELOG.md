@@ -5,6 +5,8 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-22
+
 ### Added
 - GitHub Actions CI (check/test + Linux tarball artifact) and Release workflow that attaches `aurivon-*-x86_64-linux.tar.gz` to `v*` tags; `./install.sh` inside the archive is the user installer
 
