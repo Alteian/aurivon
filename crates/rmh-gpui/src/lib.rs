@@ -20,19 +20,25 @@ mod view;
 use gpui_kit::assets::Assets;
 use gpui_kit::component::theme::{Theme, ThemeMode};
 use gpui_kit::*;
-use rmh_app::{AppConfig, MediaService, VideoMode};
+use rmh_app::MediaService;
+#[cfg(target_os = "linux")]
+use rmh_app::{AppConfig, VideoMode};
 
 pub use view::{MediaHubView, Page};
 
 /// Embedded video needs an X11 window. On Wayland desktops (COSMIC, GNOME…)
 /// run GPUI through XWayland instead, unless the user opted out.
 fn choose_backend() {
-    let cfg = AppConfig::load().unwrap_or_default();
-    let want_embed = cfg.video_mode == VideoMode::Embedded && !rmh_app::env_flag("AURIVON_FORCE_WAYLAND", "RMH_FORCE_WAYLAND");
-    if want_embed && std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var_os("DISPLAY").is_some() {
-        tracing::info!("Embedded video: using XWayland for the app window");
-        // SAFETY: called at startup before any other thread exists
-        unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+    #[cfg(target_os = "linux")]
+    {
+        let cfg = AppConfig::load().unwrap_or_default();
+        let want_embed =
+            cfg.video_mode == VideoMode::Embedded && !rmh_app::env_flag("AURIVON_FORCE_WAYLAND", "RMH_FORCE_WAYLAND");
+        if want_embed && std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var_os("DISPLAY").is_some() {
+            tracing::info!("Embedded video: using XWayland for the app window");
+            // SAFETY: called at startup before any other thread exists
+            unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+        }
     }
 }
 

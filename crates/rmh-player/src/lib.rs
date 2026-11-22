@@ -1,8 +1,8 @@
 //! UI-agnostic video/audio player built on the `mpv` executable and its JSON IPC.
 //!
-//! The player runs `mpv` as a separate process and talks to it over a Unix
-//! socket (`--input-ipc-server`). This keeps the GUI process isolated from any
-//! FFI/EGL issues and works on X11 and Wayland alike.
+//! The player runs `mpv` as a separate process and talks to it over
+//! `--input-ipc-server` (Unix socket on Linux/macOS, named pipe on Windows).
+//! This keeps the GUI process isolated from any FFI/EGL issues.
 //!
 //! Architecture:
 //! - [`Player`] is a cheap, cloneable handle. Every method is synchronous and
@@ -18,9 +18,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, RwLock};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout, Duration};
@@ -42,7 +40,7 @@ pub struct PlayerConfig {
     pub volume: u8,
     /// Let mpv remember positions itself (`--save-position-on-quit`)
     pub save_position: bool,
-    /// X11 window ID to embed into (`--wid`). `None` = separate mpv window.
+    /// Native window id for `mpv --wid` (X11 window / Win32 HWND). `None` = separate window.
     pub wid: Option<i64>,
     /// Run without any video/audio output (tests, CI)
     pub headless: bool,
@@ -445,31 +443,89 @@ impl Drop for Player {
     }
 }
 
+type IpcReader = Box<dyn AsyncRead + Unpin + Send>;
+type IpcWriter = Box<dyn AsyncWrite + Unpin + Send>;
+
 /// A live mpv process + IPC connection
 struct MpvSession {
     child: Child,
-    lines: Lines<BufReader<OwnedReadHalf>>,
-    writer: OwnedWriteHalf,
-    socket_path: PathBuf,
+    lines: Lines<BufReader<IpcReader>>,
+    writer: IpcWriter,
+    /// Unix socket path to delete on shutdown; unused on Windows named pipes
+    #[cfg_attr(windows, allow(dead_code))]
+    ipc_path: Option<PathBuf>,
 }
 
 impl MpvSession {
+    fn ipc_server_arg() -> (String, Option<PathBuf>) {
+        #[cfg(unix)]
+        {
+            let socket_path = std::env::temp_dir().join(format!("rmh-mpv-{}.sock", Uuid::new_v4()));
+            let _ = std::fs::remove_file(&socket_path);
+            (format!("--input-ipc-server={}", socket_path.display()), Some(socket_path))
+        }
+        #[cfg(windows)]
+        {
+            let name = format!(r"\\.\pipe\aurivon-mpv-{}", Uuid::new_v4());
+            (format!("--input-ipc-server={name}"), None)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let socket_path = std::env::temp_dir().join(format!("rmh-mpv-{}.sock", Uuid::new_v4()));
+            (format!("--input-ipc-server={}", socket_path.display()), Some(socket_path))
+        }
+    }
+
+    async fn connect_ipc(ipc_arg: &str, ipc_path: &Option<PathBuf>, child: &mut Child) -> Result<(IpcReader, IpcWriter)> {
+        for _ in 0..100 {
+            if let Ok(Some(status)) = child.try_wait() {
+                anyhow::bail!("mpv exited immediately ({status})");
+            }
+            #[cfg(unix)]
+            {
+                let _ = ipc_arg;
+                if let Some(path) = ipc_path {
+                    if let Ok(s) = tokio::net::UnixStream::connect(path).await {
+                        let (r, w) = s.into_split();
+                        return Ok((Box::new(r), Box::new(w)));
+                    }
+                }
+            }
+            #[cfg(windows)]
+            {
+                let _ = ipc_path;
+                // `--input-ipc-server=\\.\pipe\name` → open the same pipe as client
+                let pipe = ipc_arg.strip_prefix("--input-ipc-server=").unwrap_or(ipc_arg);
+                match tokio::net::windows::named_pipe::ClientOptions::new().open(pipe) {
+                    Ok(s) => {
+                        let (r, w) = tokio::io::split(s);
+                        return Ok((Box::new(r), Box::new(w)));
+                    }
+                    Err(_) => {}
+                }
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                let _ = (ipc_arg, ipc_path);
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+        anyhow::bail!("Timed out connecting to mpv IPC")
+    }
+
     async fn start(config: &PlayerConfig) -> Result<Self> {
-        let socket_path = std::env::temp_dir().join(format!("rmh-mpv-{}.sock", Uuid::new_v4()));
-        let _ = std::fs::remove_file(&socket_path);
+        let (ipc_arg, ipc_path) = Self::ipc_server_arg();
 
         let mut args = vec![
-            format!("--input-ipc-server={}", socket_path.display()),
+            ipc_arg.clone(),
             "--idle=yes".to_string(),
             format!("--hwdec={}", config.hwdec),
             format!("--volume={}", config.volume),
             format!("--osc={}", if config.osc { "yes" } else { "no" }),
             "--keep-open=yes".to_string(),
-            // Same streaming cache as the original libmpv build
             "--cache=yes".to_string(),
             "--cache-secs=120".to_string(),
             "--demuxer-max-bytes=500MiB".to_string(),
-            // OSC: chapter marks on the seek bar, idle logo off, hide quickly
             "--script-opts=osc-seekbarstyle=bar,osc-hidetimeout=1200,osc-idlescreen=no,osc-deadzonesize=0.2".to_string(),
             "--input-default-bindings=yes".to_string(),
             "--title=Aurivon Player - ${media-title}".to_string(),
@@ -486,8 +542,6 @@ impl MpvSession {
         }
         if let Some(wid) = config.wid {
             args.push(format!("--wid={wid}"));
-            // Mouse goes to mpv (OSC seek bar, double-click), keys stay with the
-            // host app so its shortcuts work wherever the pointer is
             args.push("--input-cursor=yes".into());
             args.push("--input-vo-keyboard=no".into());
             args.push("--cursor-autohide=1000".into());
@@ -505,7 +559,7 @@ impl MpvSession {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .with_context(|| format!("Failed to start '{}'. Is mpv installed (sudo apt install mpv)?", config.mpv_path))?;
+            .with_context(|| format!("Failed to start '{}'. Is mpv installed?", config.mpv_path))?;
 
         if let Some(stderr) = child.stderr.take() {
             tokio::spawn(async move {
@@ -516,21 +570,8 @@ impl MpvSession {
             });
         }
 
-        // Wait for the IPC socket (up to ~5s)
-        let mut stream = None;
-        for _ in 0..100 {
-            if let Ok(Some(status)) = child.try_wait() {
-                anyhow::bail!("mpv exited immediately ({status})");
-            }
-            if let Ok(s) = UnixStream::connect(&socket_path).await {
-                stream = Some(s);
-                break;
-            }
-            sleep(Duration::from_millis(50)).await;
-        }
-        let stream = stream.context("Timed out connecting to mpv IPC socket")?;
-        let (r, w) = stream.into_split();
-        let mut session = Self { child, lines: BufReader::new(r).lines(), writer: w, socket_path };
+        let (r, w) = Self::connect_ipc(&ipc_arg, &ipc_path, &mut child).await?;
+        let mut session = Self { child, lines: BufReader::new(r).lines(), writer: w, ipc_path };
 
         for (id, prop) in [
             "time-pos", "duration", "pause", "volume", "mute", "eof-reached", "idle-active", "media-title",
@@ -561,7 +602,9 @@ impl MpvSession {
         if timeout(Duration::from_secs(2), self.child.wait()).await.is_err() {
             let _ = self.child.kill().await;
         }
-        let _ = std::fs::remove_file(&self.socket_path);
+        if let Some(path) = &self.ipc_path {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -662,7 +705,9 @@ async fn run_player_actor(
                         info!("mpv closed");
                         if let Some(mut s) = session.take() {
                             let _ = timeout(Duration::from_secs(1), s.child.wait()).await;
-                            let _ = std::fs::remove_file(&s.socket_path);
+                            if let Some(path) = &s.ipc_path {
+                                let _ = std::fs::remove_file(path);
+                            }
                         }
                         set_inactive(&state);
                     }

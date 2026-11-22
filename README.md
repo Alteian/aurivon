@@ -137,10 +137,10 @@ sudo pacman -S --needed base-devel pkgconf openssl mpv libxkbcommon wayland vulk
 brew install mpv pkg-config
 ```
 
-**Windows:**
+**Windows (from source):**
 1. Install [MSVC Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
-2. Install [MPV](https://mpv.io/installation/) and add to PATH
-   (note: the IPC player currently uses Unix sockets, so playback is Linux/macOS only for now)
+2. Either use the release Setup installer (bundles mpv), or put `mpv.exe` on PATH /
+   next to `aurivon.exe` under `mpv\mpv.exe`
 
 ### Rust
 
@@ -202,8 +202,9 @@ Application data is stored in:
 
 ## Install & updates
 
-**From a GitHub Release (recommended):** each `v*` tag builds
-`aurivon-<version>-x86_64-linux.tar.gz` in CI. Download it (and the `.sha256`), then:
+**From a GitHub Release (recommended):** each `v*` tag builds install packages in CI.
+
+**Linux** — download `aurivon-<version>-x86_64-linux.tar.gz` (and `.sha256`), then:
 
 ```bash
 tar xzf aurivon-*-x86_64-linux.tar.gz
@@ -211,11 +212,15 @@ cd aurivon-*
 ./install.sh          # ~/.local — launcher entry, icons, no root
 ```
 
-After that first install, friends stay current via the in-app updater (Settings → Updates,
-or `aurivon --update`): it checks GitHub Releases on startup / every 6 hours, downloads the
-new tarball, verifies sha256, installs side-by-side under `~/.local/share/aurivon/app/versions/`,
-and swaps `current` atomically. CI only rebuilds the Linux package when code or packaging
-files change (docs-only pushes skip the heavy job).
+**Windows** — download and run `aurivon-<version>-x86_64-windows-setup.exe`
+(Inno Setup installer). It installs under `%LOCALAPPDATA%\aurivon\app\`, adds a Start Menu
+shortcut, and **bundles mpv** so playback works without a separate install. Video embeds in
+the app window via a Win32 HWND (`mpv --wid`). A portable
+`aurivon-<version>-x86_64-windows.zip` is also attached (used by the in-app updater).
+
+After the first install, stay current via Settings → Updates or `aurivon --update`: the app
+checks GitHub Releases, verifies sha256, installs the new version side-by-side under
+`…/aurivon/app/versions/`, and swaps `current` atomically.
 
 **From a checkout:**
 

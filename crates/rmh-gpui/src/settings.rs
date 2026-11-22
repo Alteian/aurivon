@@ -133,11 +133,15 @@ impl MediaHubView {
                     ),
             )
             .child(div().text_xs().text_color(rgb(p.faint)).child(if embedded_ok {
-                "Embedded: mpv draws into the app window (X11 / XWayland)."
+                if cfg!(windows) {
+                    "Embedded: mpv draws into the app window (Win32 HWND)."
+                } else {
+                    "Embedded: mpv draws into the app window (X11 / XWayland)."
+                }
             } else if cfg.video_mode == VideoMode::Embedded {
-                "Embedding isn't available in this session (needs X11/XWayland); using a separate window."
+                "Embedding isn't available in this session; using a separate window."
             } else {
-                "Separate window: mpv's own window with its on-screen controller (like the original build)."
+                "Separate window: mpv's own window with its on-screen controller."
             }))
             .child(
                 self.toggle_row("tg-osc", "mpv on-screen controller", "mpv's own seek bar with chapter marks over the video", cfg.mpv_osc, p)
