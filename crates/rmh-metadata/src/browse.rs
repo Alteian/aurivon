@@ -111,6 +111,8 @@ pub struct DiscoverQuery {
     pub sort: Sort,
     /// People (cast or crew)
     pub people: Vec<i32>,
+    /// Movies released digitally (streaming / VOD) in the last N days
+    pub digital_within_days: Option<u32>,
     pub page: u32,
 }
 
@@ -129,6 +131,7 @@ impl Default for DiscoverQuery {
             region: "CZ".into(),
             sort: Sort::Popularity,
             people: vec![],
+            digital_within_days: None,
             page: 1,
         }
     }
@@ -182,6 +185,14 @@ impl DiscoverQuery {
         if !self.people.is_empty() && movie {
             p.push(("with_people", join(&self.people, "|")));
         }
+        if let (Some(days), true) = (self.digital_within_days, movie) {
+            p.push(("with_release_type", "4|5".into()));
+            p.push(("release_date.gte", date_days_ago(days as i64)));
+            p.push(("release_date.lte", chrono_today()));
+            if !self.region.is_empty() {
+                p.push(("region", self.region.clone()));
+            }
+        }
         if matches!(self.sort, Sort::Newest) {
             // don't list unreleased titles first
             let today = chrono_today();
@@ -200,12 +211,18 @@ impl DiscoverQuery {
             || self.language.is_some()
             || !self.providers.is_empty()
             || !self.people.is_empty()
+            || self.digital_within_days.is_some()
     }
 }
 
 fn chrono_today() -> String {
+    date_days_ago(0)
+}
+
+/// "YYYY-MM-DD" of `ago` days before today (UTC)
+fn date_days_ago(ago: i64) -> String {
     // days since epoch -> civil date (no chrono dependency here)
-    let days = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 86400).unwrap_or(0) as i64;
+    let days = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 86400).unwrap_or(0) as i64 - ago;
     let z = days + 719468;
     let era = z.div_euclid(146097);
     let doe = z - era * 146097;
@@ -510,6 +527,12 @@ impl TmdbClient {
     pub async fn list(&self, kind: Kind, list: ListKind, page: u32) -> Result<ResultPage> {
         let page_s = page.max(1).to_string();
         let r: RawPage = self.get_json(&list.path(kind), &[("page", page_s.as_str())]).await?;
+        Ok(to_page(r, Some(kind)))
+    }
+
+    /// TMDB recommendations for one title ("Because you watched …")
+    pub async fn recommendations(&self, kind: Kind, tmdb_id: i32) -> Result<ResultPage> {
+        let r: RawPage = self.get_json(&format!("/{}/{tmdb_id}/recommendations", kind.as_str()), &[("page", "1")]).await?;
         Ok(to_page(r, Some(kind)))
     }
 

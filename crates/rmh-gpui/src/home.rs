@@ -18,20 +18,20 @@ impl MediaHubView {
         v
     }
 
-    fn recent_entries(&self) -> Vec<&LibraryEntry> {
+    pub(crate) fn recent_entries(&self) -> Vec<&LibraryEntry> {
         let mut v: Vec<&LibraryEntry> = self.entries.iter().collect();
         v.sort_by(|a, b| b.item.created_at.cmp(&a.item.created_at));
         v.truncate(16);
         v
     }
 
-    fn layout_switcher(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn layout_switcher(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.svc.config().home_layout;
         let mut row = div().flex().items_center().gap_2().child(div().text_xs().text_color(rgb(p.muted)).child("Home layout"));
-        for (i, l) in HomeLayout::ALL.into_iter().enumerate() {
-            let letter = ["A", "B", "C"][i];
+        for l in HomeLayout::ALL {
+            let letter = l.letter();
             row = row.child(
-                self.pill(SharedString::from(format!("layout-{letter}")), format!("{letter} · {}", l.label()), l == current, p)
+                self.pill(SharedString::from(format!("layout-{letter}")), l.label(), l == current, p)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.set_home_layout(l, cx))),
             );
         }
@@ -40,7 +40,11 @@ impl MediaHubView {
 
     pub(crate) fn home_page(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
         let layout = self.svc.config().home_layout;
+        if layout.is_feed() {
+            return div().flex().flex_col().gap_6().child(self.home_quick_bar(p, cx)).child(self.home_stream(p, cx)).into_any_element();
+        }
         let body = match layout {
+            HomeLayout::Stream | HomeLayout::Cinematic | HomeLayout::Compact => self.home_stream(p, cx),
             HomeLayout::Focus => self.home_focus(p, cx),
             HomeLayout::Discover => self.home_discover(p, cx),
             HomeLayout::Library => self.home_library(p, cx),
@@ -157,8 +161,8 @@ impl MediaHubView {
             .when_some(self.hero_backdrop.clone(), |d, b| d.child(img(b).absolute().size_full().object_fit(ObjectFit::Cover)))
             .child(div().absolute().size_full().bg(linear_gradient(
                 90.0,
-                linear_color_stop(rgba(0x0A0B10F5), 0.0),
-                linear_color_stop(rgba(0x0A0B1000), 0.75),
+                linear_color_stop(rgba((p.canvas << 8) | 0xF5), 0.0),
+                linear_color_stop(rgba(p.canvas << 8), 0.75),
             )))
             .child(
                 div()
@@ -175,7 +179,7 @@ impl MediaHubView {
                             .flex_col()
                             .gap_3()
                             .max_w(px(560.0))
-                            .child(chip("#1 TRENDING THIS WEEK", 0x8B7CF655, p.text))
+                            .child(chip("#1 TRENDING THIS WEEK", (p.accent << 8) | 0x55, p.text))
                             .child(div().text_3xl().font_weight(FontWeight::BOLD).child(t.name.clone()))
                             .child(div().text_sm().text_color(rgb(p.muted)).child(format!(
                                 "{}{}{}",

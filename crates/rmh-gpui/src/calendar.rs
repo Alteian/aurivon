@@ -257,7 +257,7 @@ impl MediaHubView {
                             .gap_1()
                             .child(chip(it.kind.label(), 0xFFFFFF10, kind_color(it.kind, p)))
                             .when_some(it.time.clone(), |d, t| d.child(chip(t, 0xFFFFFF10, p.text)))
-                            .when(it.mine, |d| d.child(chip("Mine", 0x8B7CFF33, p.accent)))
+                            .when(it.mine, |d| d.child(chip("Mine", (p.accent << 8) | 0x33, p.accent)))
                             .when(local, |d| d.child(chip("In library", 0x5FD39A22, p.good))),
                     ),
             )

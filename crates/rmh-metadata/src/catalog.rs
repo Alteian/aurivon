@@ -277,9 +277,10 @@ impl TmdbClient {
             h(6)
         } else if path.starts_with("/trending") || path.starts_with("/discover") || path.contains("/popular")
             || path.contains("/now_playing") || path.contains("/upcoming") || path.contains("/on_the_air")
-            || path.contains("/airing_today") || path.contains("/top_rated")
+            || path.contains("/airing_today") || path.contains("/top_rated") || path.contains("/recommendations")
         {
-            h(4)
+            // home / browse rows: refreshed a few times a day
+            h(6)
         } else if path.starts_with("/genre") || path.starts_with("/watch/providers") || path.starts_with("/configuration") {
             h(24 * 7)
         } else {

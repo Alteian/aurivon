@@ -268,8 +268,8 @@ impl MediaHubView {
             .when_some(d.backdrop.clone(), |el, b| el.child(img(b).absolute().size_full().object_fit(ObjectFit::Cover)))
             .child(div().absolute().size_full().bg(linear_gradient(
                 90.0,
-                linear_color_stop(rgba(0x0A0B10F8), 0.0),
-                linear_color_stop(rgba(0x0A0B1060), 1.0),
+                linear_color_stop(rgba((p.canvas << 8) | 0xF8), 0.0),
+                linear_color_stop(rgba((p.canvas << 8) | 0x60), 1.0),
             )))
             .child(
                 div()

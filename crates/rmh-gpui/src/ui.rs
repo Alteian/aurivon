@@ -8,8 +8,8 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use rmh_app::{format_time, is_audio, LibraryEntry, TitleCard, TitleKind};
 
-use crate::theme::{initials, tile_colors, Palette, DARK};
-use crate::view::{MediaHubView, Page};
+use crate::theme::{initials, tile_colors, Palette};
+use crate::view::{MediaHubView, Nav, Page};
 
 pub fn gradient(seed: &str) -> Background {
     let (c1, c2) = tile_colors(seed);
@@ -29,6 +29,14 @@ pub fn poster(seed: &str, path: Option<PathBuf>, glyph: Option<&str>) -> Div {
                 .child(glyph.map(str::to_string).unwrap_or_else(|| initials(seed))),
         ),
     }
+}
+
+/// The Aurivon mark (PNG embedded in the binary)
+pub fn logo(size: f32) -> Img {
+    static LOGO: std::sync::LazyLock<std::sync::Arc<Image>> = std::sync::LazyLock::new(|| {
+        std::sync::Arc::new(Image::from_bytes(ImageFormat::Png, include_bytes!("../assets/logo-128.png").to_vec()))
+    });
+    img(LOGO.clone()).size(px(size)).flex_none()
 }
 
 pub fn chip(text: impl Into<SharedString>, bg: u32, fg: u32) -> Div {
@@ -127,7 +135,7 @@ impl MediaHubView {
             .border_1()
             .border_color(rgb(p.border_soft))
             .bg(rgb(p.surface))
-            .child(div().text_3xl().text_color(rgb(p.accent)).child("▤"))
+            .child(logo(72.0))
             .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(title.to_string()))
             .child(div().text_sm().text_color(rgb(p.muted)).child(body.to_string()))
             .child(self.add_library_row(p, cx))
@@ -181,7 +189,7 @@ impl MediaHubView {
                         p.text,
                     )))
                     .when(e.item.watched, |d| d.child(div().absolute().top_2().right_2().child(chip("✓", 0x5FD39AEE, 0x062014))))
-                    .when(playing, |d| d.child(div().absolute().bottom_2().left_2().child(chip("▶ Playing", 0x8B7CF6FF, p.on_accent))))
+                    .when(playing, |d| d.child(div().absolute().bottom_2().left_2().child(chip("▶ Playing", (p.accent << 8) | 0xFF, p.on_accent))))
                     .when_some(progress, |d, f| d.child(progress_line(f, p))),
             )
             .child(
@@ -320,7 +328,7 @@ impl MediaHubView {
                             .justify_center()
                             .rounded_full()
                             .cursor_pointer()
-                            .bg(rgba(if listed { 0x8B7CFFEE } else { 0x000000AA }))
+                            .bg(rgba(if listed { (p.accent << 8) | 0xEE } else { 0x000000AA }))
                             .text_color(rgb(if listed { p.on_accent } else { p.text }))
                             .text_sm()
                             .hover(|s| s.bg(rgb(p.accent)).text_color(rgb(p.on_accent)))
@@ -331,7 +339,7 @@ impl MediaHubView {
                             .child(if listed { "✓" } else { "+" }),
                     )
                     .when_some(t.rating.filter(|r| *r > 0.0), |d, r| {
-                        d.child(div().absolute().top_2().right_2().child(chip(format!("★ {r:.1}"), 0x000000AA, 0xF2B45C)))
+                        d.child(div().absolute().top_2().right_2().child(chip(format!("★ {r:.1}"), 0x000000AA, p.gold)))
                     })
                     .child(div().absolute().top_2().left_2().child(chip(
                         if t.kind == TitleKind::Tv { "SERIES" } else { "MOVIE" },
@@ -382,40 +390,72 @@ impl MediaHubView {
 
     // ------------------------------------------------------------- the shell
 
-    fn sidebar(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    fn nav_selected(&self, item: Nav) -> bool {
+        match item {
+            Nav::Page(page) => self.page == page,
+            Nav::Search => self.disc.search.open,
+            Nav::Movies => self.page == Page::Discover && self.disc.browse.kind == TitleKind::Movie,
+            Nav::Series => self.page == Page::Discover && self.disc.browse.kind == TitleKind::Tv,
+        }
+    }
+
+    fn nav_items(&self) -> Vec<Nav> {
+        Nav::ALL.into_iter().filter(|i| *i != Nav::Page(Page::Player) || self.now.is_some()).collect()
+    }
+
+    /// Logo mark + optional wordmark
+    pub(crate) fn brand_lockup(&self, size: f32, wordmark: bool, p: Palette) -> Div {
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(logo(size))
+            .when(wordmark, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(div().text_base().font_weight(FontWeight::BOLD).text_color(rgb(p.gold)).child("AURIVON"))
+                        .child(div().text_xs().text_color(rgb(p.muted)).child("Media center")),
+                )
+            })
+    }
+
+    fn sidebar(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let rail = self.svc.config().nav_style == "rail";
         let mut nav = div().flex().flex_col().gap_1();
-        for page in Page::NAV {
-            if page == Page::Player && self.now.is_none() {
-                continue;
-            }
-            let selected = self.page == page || (page == Page::Discover && matches!(self.page, Page::Details | Page::Person));
+        for item in self.nav_items() {
+            let selected = self.nav_selected(item);
+            let accent_glyph = selected || item == Nav::Page(Page::Player);
             nav = nav.child(
                 div()
-                    .id(SharedString::from(format!("nav-{}", page.label())))
+                    .id(SharedString::from(format!("nav-{}", item.label())))
                     .flex()
                     .items_center()
-                    .gap_3()
-                    .px_3()
-                    .py_2()
+                    .when(rail, |d| d.justify_center().py_2())
+                    .when(!rail, |d| d.gap_3().px_3().py_2())
                     .rounded_lg()
                     .cursor_pointer()
                     .bg(rgb(if selected { p.active } else { p.sidebar }))
                     .text_color(rgb(if selected { p.text } else { p.muted }))
                     .hover(|s| s.bg(rgb(p.border_soft)).text_color(rgb(p.text)))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.navigate(page, window, cx)))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.nav_to(item, window, cx)))
                     .child(
                         div()
-                            .size(px(28.0))
+                            .size(px(if rail { 36.0 } else { 28.0 }))
                             .flex()
                             .items_center()
                             .justify_center()
                             .rounded_md()
                             .bg(rgb(if selected { p.accent_soft } else { p.surface_raised }))
-                            .text_color(rgb(if selected || page == Page::Player { p.accent } else { p.muted }))
-                            .child(page.glyph()),
+                            .text_color(rgb(if accent_glyph { p.accent } else { p.muted }))
+                            .child(item.glyph()),
                     )
-                    .child(div().flex_1().text_sm().child(page.label()))
-                    .when(selected, |d| d.child(div().w(px(3.0)).h(px(14.0)).rounded_full().bg(rgb(p.accent)))),
+                    .when(!rail, |d| {
+                        d.child(div().flex_1().text_sm().child(item.label()))
+                            .when(item == Nav::Search, |d| d.child(div().text_xs().text_color(rgb(p.faint)).child("Ctrl K")))
+                            .when(selected, |d| d.child(div().w(px(3.0)).h(px(14.0)).rounded_full().bg(rgb(p.accent))))
+                    }),
             );
         }
 
@@ -427,88 +467,85 @@ impl MediaHubView {
             _ => None,
         };
         div()
-            .w(px(220.0))
+            .w(px(if rail { crate::theme::tokens::RAIL_W } else { crate::theme::tokens::SIDEBAR_W }))
             .flex_none()
             .flex()
             .flex_col()
             .h_full()
-            .px_4()
+            .when(rail, |d| d.px_2().items_center())
+            .when(!rail, |d| d.px_4())
             .py_5()
             .gap_6()
             .bg(rgb(p.sidebar))
             .border_r_1()
             .border_color(rgb(p.border))
-            .child(
+            .child(div().px_2().child(self.brand_lockup(if rail { 40.0 } else { 38.0 }, !rail, p)))
+            .child(nav)
+            .child(div().flex_1())
+            .when(!rail, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .p_3()
+                        .rounded_lg()
+                        .bg(rgb(p.surface))
+                        .border_1()
+                        .border_color(rgb(p.border_soft))
+                        .text_xs()
+                        .text_color(rgb(p.muted))
+                        .child(format!("{} items · {} libraries", self.entries.len(), self.libraries.len()))
+                        .child(format!("{watched} watched"))
+                        .child(div().text_color(rgb(if self.mpv_version.is_some() { p.good } else { p.danger })).child(
+                            match &self.mpv_version {
+                                Some(v) => format!("● {v}{}", if self.embedded() { " · embedded" } else { "" }),
+                                None => "● mpv not found".to_string(),
+                            },
+                        ))
+                        .when_some(trakt, |d, (ok, t)| d.child(div().text_color(rgb(if ok { p.good } else { p.warn })).child(t))),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// "Top bar" navigation style: brand + horizontal nav above the page
+    fn top_nav(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let mut nav = div().flex().items_center().gap_1();
+        for item in self.nav_items() {
+            let selected = self.nav_selected(item);
+            nav = nav.child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .px_2()
-                    .child(
-                        div()
-                            .size(px(36.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_lg()
-                            .bg(linear_gradient(135.0, linear_color_stop(rgb(p.accent), 0.0), linear_color_stop(rgb(0x4CC9F0), 1.0)))
-                            .text_color(rgb(p.on_accent))
-                            .font_weight(FontWeight::BOLD)
-                            .child("▶"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("Aurivon"))
-                            .child(div().text_xs().text_color(rgb(p.muted)).child("Media center")),
-                    ),
-            )
-            .child(
-                div()
-                    .id("side-search")
+                    .id(SharedString::from(format!("tnav-{}", item.label())))
                     .flex()
                     .items_center()
                     .gap_2()
                     .px_3()
-                    .py_2()
-                    .rounded_lg()
+                    .py(px(6.0))
+                    .rounded_full()
                     .cursor_pointer()
-                    .bg(rgb(p.surface))
-                    .border_1()
-                    .border_color(rgb(p.border_soft))
                     .text_sm()
-                    .text_color(rgb(p.muted))
-                    .hover(|s| s.border_color(rgb(p.accent)))
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_search(window, cx)))
-                    .child(div().text_color(rgb(p.accent)).child("⌕"))
-                    .child(div().flex_1().child("Search"))
-                    .child(div().text_xs().text_color(rgb(p.faint)).child("Ctrl K")),
-            )
+                    .bg(rgb(if selected { p.accent_soft } else { p.sidebar }))
+                    .text_color(rgb(if selected { p.accent } else { p.muted }))
+                    .hover(|s| s.text_color(rgb(p.text)))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.nav_to(item, window, cx)))
+                    .child(div().child(item.glyph()))
+                    .child(item.label()),
+            );
+        }
+        div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_6()
+            .px_6()
+            .py_3()
+            .bg(rgb(p.sidebar))
+            .border_b_1()
+            .border_color(rgb(p.border))
+            .child(self.brand_lockup(32.0, true, p))
             .child(nav)
-            .child(div().flex_1())
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .p_3()
-                    .rounded_lg()
-                    .bg(rgb(p.surface))
-                    .border_1()
-                    .border_color(rgb(p.border_soft))
-                    .text_xs()
-                    .text_color(rgb(p.muted))
-                    .child(format!("{} items · {} libraries", self.entries.len(), self.libraries.len()))
-                    .child(format!("{watched} watched"))
-                    .child(div().text_color(rgb(if self.mpv_version.is_some() { p.good } else { p.danger })).child(
-                        match &self.mpv_version {
-                            Some(v) => format!("● {v}{}", if self.embedded() { " · embedded" } else { "" }),
-                            None => "● mpv not found".to_string(),
-                        },
-                    ))
-                    .when_some(trakt, |d, (ok, t)| d.child(div().text_color(rgb(if ok { p.good } else { p.warn })).child(t))),
-            )
+            .into_any_element()
     }
 
     fn top_bar(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
@@ -516,6 +553,7 @@ impl MediaHubView {
             Page::Details => self.details.as_ref().map(|d| d.name.clone()).unwrap_or_default(),
             Page::Person => self.disc.person.as_ref().map(|d| d.name.clone()).unwrap_or_default(),
             Page::Player => self.now.as_ref().map(|n| n.title.clone()).unwrap_or_default(),
+            Page::Discover => if self.disc.browse.kind == TitleKind::Movie { "Movies" } else { "Series" }.to_string(),
             other => other.label().to_string(),
         };
         div()
@@ -647,7 +685,16 @@ pub fn human_size(bytes: i64) -> String {
 
 impl Render for MediaHubView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = DARK;
+        let p = self.palette(window);
+        if p.light != self.kit_light {
+            // inputs / sliders from gpui-kit follow the light / dark mode
+            self.kit_light = p.light;
+            gpui_kit::component::theme::Theme::change(
+                if p.light { gpui_kit::component::theme::ThemeMode::Light } else { gpui_kit::component::theme::ThemeMode::Dark },
+                Some(window),
+                cx,
+            );
+        }
         self.ensure_video_host(window);
         if self.disc.search.open && self.disc.search.focus_pending {
             self.disc.search.focus_pending = false;
@@ -660,7 +707,13 @@ impl Render for MediaHubView {
         let on_player = self.page == Page::Player && self.now.is_some();
         // browse grid columns for keyboard navigation
         let vw = f32::from(window.viewport_size().width);
-        let content = vw - if self.theater { 0.0 } else { 220.0 } - 64.0 - 14.0;
+        let side = match self.svc.config().nav_style.as_str() {
+            _ if self.theater => 0.0,
+            "top" => 0.0,
+            "rail" => crate::theme::tokens::RAIL_W,
+            _ => crate::theme::tokens::SIDEBAR_W,
+        };
+        let content = vw - side - 64.0 - 14.0;
         self.disc.grid_cols = (((content + crate::browse::GRID_GAP) / (crate::browse::GRID_CARD + crate::browse::GRID_GAP)).floor() as usize).max(1);
         if self.disc.search.open {
             if let Some(v) = &self.video {
@@ -709,6 +762,7 @@ impl Render for MediaHubView {
                 .into_any_element()
         };
 
+        let top_nav = self.svc.config().nav_style == "top";
         let mut shell = div()
             .track_focus(&self.focus_handle)
             .key_context("MediaHub")
@@ -718,8 +772,12 @@ impl Render for MediaHubView {
             .size_full()
             .bg(rgb(p.canvas))
             .text_color(rgb(p.text))
-            .when(!self.theater, |d| d.child(self.sidebar(p, cx)))
-            .child(main);
+            .when(!self.theater && !top_nav, |d| d.child(self.sidebar(p, cx)))
+            .child(if top_nav && !self.theater {
+                div().flex_1().flex().flex_col().h_full().min_w_0().child(self.top_nav(p, cx)).child(main).into_any_element()
+            } else {
+                main
+            });
         if self.disc.search.open {
             shell = shell.child(self.search_overlay(p, cx));
         }

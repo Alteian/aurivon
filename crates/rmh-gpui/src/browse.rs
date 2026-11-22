@@ -106,7 +106,7 @@ impl MediaHubView {
                     .child(label),
             );
         }
-        if b.query.is_filtered() {
+        if b.query.is_filtered() || b.list.is_some() {
             chips = chips.child(self.pill("facet-clear", "✕ Clear", false, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.clear_filters(cx))));
         }
         col = col.child(chips);
@@ -207,7 +207,12 @@ impl MediaHubView {
             } else if !b.loading && b.results.is_empty() {
                 body = body.child(div().text_sm().text_color(rgb(p.muted)).child("No titles match these filters."));
             }
-            col = col.child(self.section("Results", Some(head), body.into_any_element(), p));
+            let title = match b.list {
+                Some(l) => l.label(kind).to_string(),
+                None if b.query.digital_within_days.is_some() => "New on streaming".to_string(),
+                None => "Results".to_string(),
+            };
+            col = col.child(self.section(title, Some(head), body.into_any_element(), p));
         } else {
             for (l, cards) in &b.rows {
                 let items: Vec<AnyElement> = if cards.is_empty() {
