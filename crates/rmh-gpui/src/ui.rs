@@ -151,6 +151,7 @@ impl MediaHubView {
         let sub = e.subtitle();
         let progress = entry_progress(e);
         let resume = (e.item.watch_progress > 0 && !e.item.watched).then(|| format!("Resume {}", format_time(e.item.watch_progress as f64)));
+        let couch_on = self.svc.config().couch_mode && self.couch_focus == Some(id);
         div()
             .id(SharedString::from(format!("card-{key}-{id}")))
             .w(px(width))
@@ -175,7 +176,8 @@ impl MediaHubView {
                     .rounded_xl()
                     .overflow_hidden()
                     .border_1()
-                    .border_color(rgb(if playing { p.accent } else { p.border_soft }))
+                    .border_color(rgb(if playing || couch_on { p.accent } else { p.border_soft }))
+                    .when(couch_on, |d| d.border_2().shadow_md())
                     .hover(|s| s.border_color(rgb(p.accent)))
                     .child(poster(&title, e.poster(), audio.then_some("♪")))
                     .child(div().absolute().top_2().left_2().child(chip(
@@ -196,6 +198,7 @@ impl MediaHubView {
                 div()
                     .flex()
                     .flex_col()
+                    .gap_1()
                     .child(div().text_sm().text_color(rgb(p.text)).truncate().child(title))
                     .child(
                         div()
@@ -203,7 +206,35 @@ impl MediaHubView {
                             .text_color(rgb(p.muted))
                             .truncate()
                             .child(resume.or(sub).unwrap_or_else(|| human_size(e.item.file_size))),
-                    ),
+                    )
+                    .child({
+                        let matched = rmh_app::entry_is_matched(e);
+                        let locked = e.link.as_ref().is_some_and(|l| l.match_locked != 0);
+                        let mid = id;
+                        div()
+                            .flex()
+                            .gap_1()
+                            .child(
+                                self.button(
+                                    SharedString::from(format!("fix-{key}-{id}")),
+                                    if matched { "Fix" } else { "Match" },
+                                    false,
+                                    p,
+                                )
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.begin_fix_match(mid, window, cx))),
+                            )
+                            .when(matched, |d| {
+                                d.child(
+                                    self.button(
+                                        SharedString::from(format!("lock-{key}-{id}")),
+                                        if locked { "Unlock" } else { "Lock" },
+                                        false,
+                                        p,
+                                    )
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.toggle_match_lock(mid, cx))),
+                                )
+                            })
+                    }),
             )
             .into_any_element()
     }
@@ -245,7 +276,14 @@ impl MediaHubView {
                             .flex_col()
                             .gap_1()
                             .child(div().text_base().font_weight(FontWeight::SEMIBOLD).truncate().child(title.clone()))
-                            .child(div().text_xs().text_color(rgb(p.muted)).truncate().child(e.subtitle().unwrap_or_default()))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(chip("Local", 0x5FD39A22, p.good))
+                                    .child(div().text_xs().text_color(rgb(p.muted)).truncate().child(e.subtitle().unwrap_or_default())),
+                            )
                             .child(
                                 div()
                                     .text_xs()
@@ -273,7 +311,7 @@ impl MediaHubView {
                                     .justify_between()
                                     .text_xs()
                                     .text_color(rgb(p.muted))
-                                    .child(format!("▶ Resume {}", format_time(e.item.watch_progress as f64)))
+                                    .child(format!("▶ Resume on device · {}", format_time(e.item.watch_progress as f64)))
                                     .child(left.unwrap_or_default()),
                             ),
                     ),
@@ -291,8 +329,8 @@ impl MediaHubView {
         let card = c.clone();
         let wl_card = c.clone();
         let t = &c.title;
-        let local = self.disc.local_ids.contains(&(t.kind, t.tmdb_id));
-        let listed = self.disc.watch_ids.contains(&(t.kind, t.tmdb_id));
+        let avail = self.title_availability(t.kind, t.tmdb_id);
+        let listed = avail.on_watchlist;
         let wl_id = SharedString::from(format!("wl-{key}-{}-{}", t.kind.as_str(), t.tmdb_id));
         div()
             .id(SharedString::from(format!("title-{key}-{}-{}", t.kind.as_str(), t.tmdb_id)))
@@ -315,7 +353,10 @@ impl MediaHubView {
                     .when(sel, |d| d.shadow_lg())
                     .hover(|s| s.border_color(rgb(p.accent)))
                     .child(self.lazy_poster(&t.name, c.poster.clone(), rmh_app::images::poster_url(t), None))
-                    .when(local, |d| d.child(div().absolute().bottom_2().left_2().child(chip("▶ In library", 0x0F2A1EE6, p.good))))
+                    .when(avail.local, |d| d.child(div().absolute().bottom_2().left_2().child(chip("▶ On device", 0x0F2A1EE6, p.good))))
+                    .when(avail.in_collection && !avail.local, |d| {
+                        d.child(div().absolute().bottom_2().left_2().child(chip("Collection", 0x4CC9F022, 0x4CC9F0)))
+                    })
                     .child(
                         div()
                             .id(wl_id)
@@ -669,7 +710,8 @@ impl MediaHubView {
             .absolute()
             .top_5()
             .right_5()
-            .max_w(px(520.0))
+            .max_w(px(560.0))
+            .max_h(px(220.0))
             .flex()
             .items_start()
             .gap_3()
@@ -689,8 +731,9 @@ impl MediaHubView {
                 div()
                     .flex_1()
                     .min_w_0()
+                    .max_h(px(180.0))
+                    .overflow_y_scrollbar()
                     .text_sm()
-                    .overflow_hidden()
                     .child(err),
             )
             .child(div().text_color(rgb(p.muted)).child("✕"))

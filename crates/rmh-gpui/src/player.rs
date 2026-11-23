@@ -353,11 +353,56 @@ impl MediaHubView {
                     );
                 }
                 if kind == TrackKind::Sub {
+                    let delay = self.snap.sub_delay;
+                    let forced_on = self.svc.config().sub_forced_only;
+                    body = body
+                        .child(div().h(px(8.0)))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .px_1()
+                                .child(div().flex_1().text_xs().text_color(rgb(p.muted)).child(format!("Timing {delay:+.1}s")))
+                                .child(
+                                    self.button("sub-d-", "−0.5s", false, p)
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.nudge_sub_delay(-0.5, cx))),
+                                )
+                                .child(
+                                    self.button("sub-d+", "+0.5s", false, p)
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.nudge_sub_delay(0.5, cx))),
+                                )
+                                .child(
+                                    self.button("sub-d0", "0", false, p)
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.reset_sub_delay(cx))),
+                                ),
+                        )
+                        .child(
+                            self.toggle_row_pub("tg-forced", "Forced only", "Show forced events (signs, alien speech)", forced_on, p)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.toggle_sub_forced_only(cx))),
+                        )
+                        .child(div().px_1().pt_2().text_xs().text_color(rgb(p.faint)).child("Secondary (dual)"))
+                        .child(
+                            row(
+                                "sec-off".into(),
+                                "Secondary off".into(),
+                                None,
+                                self.snap.secondary_sid.is_none(),
+                            )
+                            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.select_secondary_sub(None, cx))),
+                        );
+                    for t in self.snap.tracks.iter().filter(|t| t.kind == TrackKind::Sub) {
+                        let id = t.id;
+                        let on = self.snap.secondary_sid == Some(id);
+                        body = body.child(
+                            row(format!("sec-{id}"), format!("2nd · {}", t.label()), Some(format!("#{id}")), on)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.select_secondary_sub(Some(id), cx))),
+                        );
+                    }
                     body = body.child(div().h(px(8.0))).child(
                         div()
                             .flex()
                             .gap_2()
-                            // only offered once an OpenSubtitles key is configured
                             .when(self.svc.has_opensubtitles(), |d| {
                                 d.child(
                                     self.button("sub-os", if self.disc.subs_loading { "Searching…" } else { "Search OpenSubtitles" }, true, p)
@@ -403,13 +448,36 @@ impl MediaHubView {
                             .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.set_speed(s, cx))),
                     );
                 }
-                body = body.child(
-                    div()
-                        .p_3()
-                        .text_xs()
-                        .text_color(rgb(p.faint))
-                        .child("[ / ] slower / faster · Backspace resets · , / . step one frame (pauses)"),
-                );
+                let decode = self.snap.hwdec_current.clone().unwrap_or_else(|| {
+                    let want = self.svc.config().mpv_hwdec.clone();
+                    if want == "no" {
+                        "software".into()
+                    } else {
+                        format!("{want} (pending)")
+                    }
+                });
+                let video = self.snap.video_info.clone().unwrap_or_else(|| "waiting for video…".into());
+                body = body
+                    .child(div().h(px(8.0)))
+                    .child(
+                        div()
+                            .p_3()
+                            .rounded_lg()
+                            .bg(rgb(p.surface_raised))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).child("Pipeline"))
+                            .child(div().text_xs().text_color(rgb(p.muted)).child(format!("Decode · {decode}")))
+                            .child(div().text_xs().text_color(rgb(p.muted)).child(format!("Video · {video}"))),
+                    )
+                    .child(
+                        div()
+                            .p_3()
+                            .text_xs()
+                            .text_color(rgb(p.faint))
+                            .child("[ / ] slower / faster · Backspace resets · , / . frame · z / x sub delay"),
+                    );
             }
         }
 

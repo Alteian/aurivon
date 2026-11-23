@@ -358,7 +358,12 @@ impl MediaHubView {
     pub(crate) fn card_dims(&self) -> CardDims {
         let cfg = self.svc.config();
         let landscape = cfg.card_style == "landscape";
-        let size = if cfg.home_layout == rmh_app::HomeLayout::Compact { "s" } else { cfg.card_size.as_str() };
+        let size_owned = self.effective_card_size();
+        let size = if cfg.home_layout == rmh_app::HomeLayout::Compact {
+            "s"
+        } else {
+            size_owned.as_str()
+        };
         let w = match (landscape, size) {
             (false, "s") => 126.0,
             (false, "l") => 196.0,
@@ -398,33 +403,161 @@ impl MediaHubView {
             col = col.child(self.hero_carousel(if layout == rmh_app::HomeLayout::Cinematic { 600.0 } else { 440.0 }, p, cx));
         }
 
-        // Continue watching: local progress + things started on Trakt
-        if cfg.home_row_visible("continue") {
-            let mut items: Vec<AnyElement> = self.continue_entries().iter().take(12).map(|e| self.wide_entry_card(e, "s-cont", p, cx)).collect();
-            if self.trakt.logged_in && cfg.home_row_visible("trakt_playback") {
-                let local: std::collections::HashSet<i64> = self.entries.iter().filter_map(|e| e.link.as_ref().and_then(|l| l.tmdb_id)).collect();
-                let playback: Vec<i64> = self.trakt_lists.playback.iter().filter_map(|e| e.tmdb_id()).collect();
-                for c in &self.trakt_cards {
-                    let id = c.title.tmdb_id as i64;
-                    if playback.contains(&id) && !local.contains(&id) {
-                        items.push(self.feed_card(c, "s-tpb", Some("Continue · Trakt"), &prog, p, cx));
+        let mut did_watchlist = false;
+        let mut did_trending = false;
+
+        for key in &cfg.home_rows {
+            match key.as_str() {
+                "continue" => {
+                    let mut items: Vec<AnyElement> =
+                        self.continue_entries().iter().take(12).map(|e| self.wide_entry_card(e, "s-cont", p, cx)).collect();
+                    // Fold Trakt playback into Continue when both are enabled (local first)
+                    if self.trakt.logged_in && cfg.home_row_visible("trakt_playback") {
+                        let local: std::collections::HashSet<i64> =
+                            self.entries.iter().filter_map(|e| e.link.as_ref().and_then(|l| l.tmdb_id)).collect();
+                        let playback: Vec<i64> = self.trakt_lists.playback.iter().filter_map(|e| e.tmdb_id()).collect();
+                        for c in &self.trakt_cards {
+                            let id = c.title.tmdb_id as i64;
+                            if playback.contains(&id) && !local.contains(&id) {
+                                items.push(self.feed_card(c, "s-tpb", Some("Continue · Trakt"), &prog, p, cx));
+                            }
+                        }
+                    }
+                    if !items.is_empty() {
+                        let n = items.len();
+                        col = col.child(self.feed_section(
+                            "s-cont",
+                            "Continue watching",
+                            Some(format!("{n} in progress · local first, then Trakt")),
+                            None,
+                            items,
+                            p,
+                            cx,
+                        ));
                     }
                 }
-            }
-            if !items.is_empty() {
-                let n = items.len();
-                col = col.child(self.feed_section("s-cont", "Continue watching", Some(format!("{n} in progress")), None, items, p, cx));
-            }
-        }
-        if cfg.home_row_visible("up_next") {
-            let next = up_next(&self.entries);
-            if !next.is_empty() {
-                let items = next.iter().map(|e| self.entry_card(e, "s-next", 170.0, p, cx)).collect();
-                col = col.child(self.feed_section("s-next", "Up next", Some("next episode of shows you're watching".into()), None, items, p, cx));
+                "trakt_playback" if !cfg.home_row_visible("continue") => {
+                    if self.trakt.logged_in && !self.trakt_cards.is_empty() {
+                        let local: std::collections::HashSet<i64> =
+                            self.entries.iter().filter_map(|e| e.link.as_ref().and_then(|l| l.tmdb_id)).collect();
+                        let playback: Vec<i64> = self.trakt_lists.playback.iter().filter_map(|e| e.tmdb_id()).collect();
+                        let items: Vec<AnyElement> = self
+                            .trakt_cards
+                            .iter()
+                            .filter(|c| {
+                                let id = c.title.tmdb_id as i64;
+                                playback.contains(&id) && !local.contains(&id)
+                            })
+                            .map(|c| self.feed_card(c, "s-tpb", Some("Continue · Trakt"), &prog, p, cx))
+                            .collect();
+                        if !items.is_empty() {
+                            col = col.child(self.feed_section(
+                                "s-tpb",
+                                "Continue on Trakt",
+                                Some("started elsewhere · stream it here".into()),
+                                None,
+                                items,
+                                p,
+                                cx,
+                            ));
+                        }
+                    }
+                }
+                "trakt_playback" => {}
+                "up_next" => {
+                    let next = up_next(&self.entries);
+                    if !next.is_empty() {
+                        let items = next.iter().map(|e| self.entry_card(e, "s-next", 170.0, p, cx)).collect();
+                        col = col.child(self.feed_section(
+                            "s-next",
+                            "Up next",
+                            Some("next episode of shows you're watching".into()),
+                            None,
+                            items,
+                            p,
+                            cx,
+                        ));
+                    }
+                }
+                "watchlist" => {
+                    did_watchlist = true;
+                    col = col.when_some(self.watchlist_row(&prog, p, cx), |c, r| c.child(r));
+                }
+                "trending" => {
+                    did_trending = true;
+                    if self.trending.len() > HERO_SLIDES {
+                        let items = self.trending.iter().map(|c| self.feed_card(c, "s-tw", None, &prog, p, cx)).collect();
+                        col = col.child(self.feed_section("s-tw", "Trending this week", None, Some(usize::MAX), items, p, cx));
+                    }
+                }
+                "library" => {
+                    if !self.entries.is_empty() {
+                        let w = self.poster_width(120.0);
+                        let items = self.recent_entries().iter().take(14).map(|e| self.entry_card(e, "s-lib", w, p, cx)).collect();
+                        col = col.child(self.feed_section(
+                            "s-lib",
+                            "On this device",
+                            Some(format!("{} files in your folders", self.entries.len())),
+                            Some(usize::MAX - 1),
+                            items,
+                            p,
+                            cx,
+                        ));
+                    }
+                }
+                k if k.starts_with("smart:") => {
+                    let entries = self.smart_collection_entries(k);
+                    if !entries.is_empty() {
+                        let title = rmh_app::smart_collection_builtins()
+                            .iter()
+                            .find(|(id, _)| *id == k)
+                            .map(|(_, label)| *label)
+                            .unwrap_or("Collection");
+                        let w = self.poster_width(140.0);
+                        let sid = format!("s-{k}");
+                        let items = entries.iter().map(|e| self.entry_card(e, &sid, w, p, cx)).collect();
+                        col = col.child(self.feed_section(
+                            &sid,
+                            title,
+                            Some(format!("{} on this device", entries.len())),
+                            None,
+                            items,
+                            p,
+                            cx,
+                        ));
+                    }
+                }
+                k if k.starts_with("trakt_list:") => {
+                    let id = &k["trakt_list:".len()..];
+                    let cards = self.svc.cached_list_cards(id);
+                    if !cards.is_empty() {
+                        let name = self
+                            .disc
+                            .lists
+                            .cache
+                            .lists
+                            .iter()
+                            .find(|l| rmh_app::MediaService::user_list_id(l) == id)
+                            .map(|l| l.name.clone())
+                            .unwrap_or_else(|| id.to_string());
+                        let sid = format!("s-tl-{id}");
+                        let items = cards.iter().map(|c| self.feed_card(c, &sid, None, &prog, p, cx)).collect();
+                        col = col.child(self.feed_section(
+                            &sid,
+                            &name,
+                            Some(format!("{} titles · Trakt list", cards.len())),
+                            None,
+                            items,
+                            p,
+                            cx,
+                        ));
+                    }
+                }
+                _ => {}
             }
         }
 
-        // Official Trakt catalogs addon rows
+        // Official Trakt catalogs addon rows (after configured rows)
         if self.trakt.logged_in && cfg.enable_trakt_catalogs {
             if !self.trakt_history_cards.is_empty() {
                 let items = self.trakt_history_cards.iter().map(|c| self.feed_card(c, "s-th", Some("Watched on Trakt"), &prog, p, cx)).collect();
@@ -440,40 +573,30 @@ impl MediaHubView {
             col = col.child(
                 self.card(p)
                     .child(self.section_title("Add TMDB for discovery rows", p))
-                    .child(div().text_sm().text_color(rgb(p.muted)).child("Add a free TMDB API key in Settings → Services to see trending, popular and new titles here.")),
+                    .child(div().text_sm().text_color(rgb(p.muted)).child(
+                        "Add a free TMDB API key in Settings → Services to see trending, popular and new titles here.",
+                    )),
             );
+            if !did_watchlist {
+                col = col.when_some(self.watchlist_row(&prog, p, cx), |c, r| c.child(r));
+            }
         } else {
             for (i, row) in self.feed.rows.iter().enumerate() {
-                // Watchlist sits after the curated "for you" block
-                if row.key == "g_action" {
+                if !did_watchlist && row.key == "g_action" {
                     col = col.when_some(self.watchlist_row(&prog, p, cx), |c, r| c.child(r));
+                    did_watchlist = true;
                 }
-                if row.key == "pop_movies" && cfg.home_row_visible("trending") && self.trending.len() > HERO_SLIDES {
+                if !did_trending && row.key == "pop_movies" && cfg.home_row_visible("trending") && self.trending.len() > HERO_SLIDES {
                     let items = self.trending.iter().map(|c| self.feed_card(c, "s-tw", None, &prog, p, cx)).collect();
                     col = col.child(self.feed_section("s-tw", "Trending this week", None, Some(usize::MAX), items, p, cx));
+                    did_trending = true;
                 }
                 if let Some(el) = self.feed_row(i, row, &prog, p, cx) {
                     col = col.child(el);
                 }
             }
         }
-        if !self.svc.has_tmdb() {
-            col = col.when_some(self.watchlist_row(&prog, p, cx), |c, r| c.child(r));
-        }
 
-        // The local library: last and small
-        if cfg.home_row_visible("library") && !self.entries.is_empty() {
-            let items = self.recent_entries().iter().take(14).map(|e| self.entry_card(e, "s-lib", 120.0, p, cx)).collect();
-            col = col.child(self.feed_section(
-                "s-lib",
-                "From your library",
-                Some(format!("{} local files", self.entries.len())),
-                Some(usize::MAX - 1),
-                items,
-                p,
-                cx,
-            ));
-        }
         col.into_any_element()
     }
 
@@ -614,8 +737,9 @@ impl MediaHubView {
         let t = &c.title;
         let dims = self.card_dims();
         let w = dims.w;
-        let local = self.disc.local_ids.contains(&(t.kind, t.tmdb_id));
-        let listed = self.disc.watch_ids.contains(&(t.kind, t.tmdb_id));
+        let avail = self.title_availability(t.kind, t.tmdb_id);
+        let local = avail.local;
+        let listed = avail.on_watchlist;
         let (watched, progress) = prog.get(&(t.kind, t.tmdb_id)).copied().unwrap_or((false, None));
         let gid = SharedString::from(format!("fc-{key}-{}-{}", t.kind.as_str(), t.tmdb_id));
         let wl_id = SharedString::from(format!("fwl-{key}-{}-{}", t.kind.as_str(), t.tmdb_id));

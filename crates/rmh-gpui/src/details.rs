@@ -12,10 +12,59 @@ impl MediaHubView {
     pub(crate) fn streams_list(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
         let label = self.stream_ctx.as_ref().map(|c| c.label.clone()).unwrap_or_default();
         if self.streams_loading {
-            return div().text_sm().text_color(rgb(p.muted)).child(format!("Looking for streams for {label}…")).into_any_element();
+            return div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .px_4()
+                .py_3()
+                .rounded_lg()
+                .bg(rgb(p.surface))
+                .border_1()
+                .border_color(rgb(p.border_soft))
+                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(format!("Finding torrents for {label}…")))
+                .child(div().text_xs().text_color(rgb(p.muted)).child("Torrentio and stream addons · usually a few seconds"))
+                .into_any_element();
         }
         if self.streams.is_empty() {
-            return div().into_any_element();
+            let tip = if !self.stream_warnings.is_empty() {
+                self.stream_warnings.join(" · ")
+            } else if !self.svc.config().enable_torrentio && self.svc.config().addons.iter().all(|a| !a.enabled) {
+                "Torrentio is off and no stream addons are enabled. Open Addons and turn Torrentio on.".into()
+            } else {
+                "No torrents matched this title. Try again, check your network, or install another stream addon.".into()
+            };
+            return div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .px_4()
+                .py_3()
+                .rounded_lg()
+                .bg(rgb(p.surface))
+                .border_1()
+                .border_color(rgb(p.warn))
+                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(rgb(p.warn)).child("No streams found"))
+                .child(div().text_sm().text_color(rgb(p.muted)).child(tip))
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(self.button("sf-retry", "Retry search", true, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            if let Some(ctx) = this.stream_ctx.clone() {
+                                if let Some(imdb) = ctx.imdb.clone() {
+                                    this.load_streams(imdb, ctx.episode, ctx, cx);
+                                }
+                            }
+                        })))
+                        .when(!self.svc.config().enable_torrentio, |d| {
+                            d.child(self.button("sf-torrentio", "Enable Torrentio", false, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                this.update_config(|c| c.enable_torrentio = true, false, cx);
+                                this.status = Some("Torrentio enabled · hit Retry search".into());
+                            })))
+                        }),
+                )
+                .into_any_element();
         }
         let f = &self.stream_filter;
         let shown = rmh_app::streams::apply(&self.streams, f);
@@ -75,6 +124,18 @@ impl MediaHubView {
             }));
 
         let mut rows = div().flex().flex_col().gap_1();
+        if !self.stream_warnings.is_empty() {
+            rows = rows.child(
+                div()
+                    .px_4()
+                    .py_2()
+                    .rounded_lg()
+                    .bg(rgb(p.surface_raised))
+                    .text_xs()
+                    .text_color(rgb(p.warn))
+                    .child(format!("Some sources failed: {}", self.stream_warnings.join(" · "))),
+            );
+        }
         if let Some((what, line)) = starting {
             rows = rows.child(
                 div()
@@ -225,8 +286,8 @@ impl MediaHubView {
             };
             actions = actions.child(self.button("det-play", label, true, p).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.play_item(id, window, cx))));
         }
-        if kind == Some(TitleKind::Movie) {
-            if let Some(imdb) = imdb.clone() {
+        if let Some(imdb) = imdb.clone() {
+            if kind == Some(TitleKind::Movie) {
                 let tvdb = d.details.as_ref().and_then(|x| x.tvdb_id);
                 let ctx = StreamContext {
                     label: name.clone(),
@@ -239,7 +300,40 @@ impl MediaHubView {
                     self.button("det-streams", "Find streams", local.is_none(), p)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.load_streams(imdb.clone(), None, ctx.clone(), cx))),
                 );
+            } else if kind == Some(TitleKind::Tv) {
+                // Prefer Trakt next episode, else S01E01 as a discovery probe
+                let (s, n) = d
+                    .trakt_progress
+                    .as_ref()
+                    .and_then(|p| Some((p.next_season?, p.next_number?)))
+                    .unwrap_or((1, 1));
+                let tvdb = d.details.as_ref().and_then(|x| x.tvdb_id);
+                let show_tmdb = tmdb_id.unwrap_or(0) as i64;
+                let ctx = StreamContext {
+                    label: format!("{name} · S{s:02}E{n:02}"),
+                    trakt: Some(TraktItem::Episode { show_tmdb, season: s, number: n }),
+                    imdb: Some(imdb.clone()),
+                    episode: Some((s, n)),
+                    tvdb_id: tvdb,
+                };
+                actions = actions.child(
+                    self.button("det-streams-ep", format!("Find streams · S{s:02}E{n:02}"), local.is_none(), p)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                            this.load_streams(imdb.clone(), Some((s, n)), ctx.clone(), cx)
+                        })),
+                );
             }
+        }
+        if let Some(e) = &local {
+            let mid = e.item.id;
+            let locked = e.link.as_ref().is_some_and(|l| l.match_locked != 0);
+            actions = actions
+                .child(self.button("det-fix", "Fix match", false, p).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.begin_fix_match(mid, window, cx)
+                })))
+                .child(self.button("det-lock", if locked { "Unlock match" } else { "Lock match" }, false, p).on_click(
+                    cx.listener(move |this, _: &ClickEvent, _w, cx| this.toggle_match_lock(mid, cx)),
+                ));
         }
         let extras = self.disc.extras.as_ref().filter(|(k, _)| Some(k.0) == kind && Some(k.1) == tmdb_id).map(|(_, x)| x);
         if let Some(v) = extras.and_then(|x| x.extras.best_trailer()).and_then(|v| v.url()) {
@@ -301,13 +395,27 @@ impl MediaHubView {
                         })
                         .detach();
                     })))
-                    .child(self.button("det-coll", "In collection", false, p).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                        let fut = this.svc.trakt_collection_toggle(kind_m, tid, true);
+                    .child(self.button(
+                        "det-coll",
+                        if self.disc.collection_ids.contains(&(kind_m, tid)) { "Leave collection" } else { "In collection" },
+                        false,
+                        p,
+                    ).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        let add = !this.disc.collection_ids.contains(&(kind_m, tid));
+                        let fut = this.svc.trakt_collection_toggle(kind_m, tid, add);
                         cx.spawn(async move |this, cx| {
                             let res = fut.await;
                             this.update(cx, |this, cx| {
                                 match res {
-                                    Ok(()) => this.status = Some("Added to Trakt collection".into()),
+                                    Ok(()) => {
+                                        if add {
+                                            this.disc.collection_ids.insert((kind_m, tid));
+                                            this.status = Some("Added to Trakt collection".into());
+                                        } else {
+                                            this.disc.collection_ids.remove(&(kind_m, tid));
+                                            this.status = Some("Removed from Trakt collection".into());
+                                        }
+                                    }
                                     Err(e) => this.error = Some(e),
                                 }
                                 cx.notify();
@@ -428,6 +536,42 @@ impl MediaHubView {
             );
 
         let mut col = div().flex().flex_col().gap_6().child(header);
+
+        // Sources hub: on-disk file + stream search (same title, two ways to play)
+        {
+            let mut src = div().flex().flex_col().gap_2();
+            if let Some(e) = &local {
+                src = src.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(p.muted))
+                        .child(format!("On this device · {}", e.item.file_path)),
+                );
+            } else {
+                src = src.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(p.muted))
+                        .child("No local file matched · use Find streams or add a library folder"),
+                );
+            }
+            if self.stream_ctx.is_some() {
+                src = src.child(self.streams_list(p, cx));
+            } else if imdb.is_some() {
+                src = src.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(p.faint))
+                        .child("Use Find streams above for Torrentio / addons"),
+                );
+            }
+            col = col.child(self.section(
+                "Sources",
+                Some("local file and online streams for this title".into()),
+                src.into_any_element(),
+                p,
+            ));
+        }
 
         // Seasons & episodes
         if let (Some(TitleKind::Tv), Some(show), Some(det)) = (kind, tmdb_id, det.as_ref()) {
@@ -551,9 +695,6 @@ impl MediaHubView {
             col = col.child(self.section("Seasons", None, seasons.into_any_element(), p)).child(eps);
         }
 
-        if self.stream_ctx.is_some() {
-            col = col.child(self.streams_list(p, cx));
-        }
         if let Some(x) = extras.cloned() {
             col = col.child(self.extras_sections(&x, kind, p, cx));
         } else if self.disc.extras_loading {
@@ -566,13 +707,26 @@ impl MediaHubView {
         col.into_any_element()
     }
 
-    /// "In library" / "Real-Debrid" / "On Netflix" badges
+    /// On-device / watchlist / collection / Real-Debrid / “On Netflix” badges
     fn availability(&self, kind: Option<TitleKind>, tmdb_id: Option<i32>, local: bool, p: Palette) -> impl IntoElement {
         let extras = self.disc.extras.as_ref().filter(|(k, _)| Some(k.0) == kind && Some(k.1) == tmdb_id).map(|(_, x)| x);
-        let local = local || matches!((kind, tmdb_id), (Some(k), Some(id)) if self.disc.local_ids.contains(&(k, id)));
+        let avail = match (kind, tmdb_id) {
+            (Some(k), Some(id)) => {
+                let mut a = self.title_availability(k, id);
+                a.local = a.local || local;
+                a
+            }
+            _ => rmh_app::TitleAvailability { local, ..Default::default() },
+        };
         let mut row = div().flex().flex_wrap().items_center().gap_2();
-        if local {
-            row = row.child(chip("▶ Available locally", 0x5FD39A22, p.good));
+        if avail.local {
+            row = row.child(chip("▶ On this device", 0x5FD39A22, p.good));
+        }
+        if avail.on_watchlist {
+            row = row.child(chip("✓ On watchlist", (p.accent << 8) | 0x33, p.accent));
+        }
+        if avail.in_collection {
+            row = row.child(chip("In collection", 0x4CC9F022, 0x4CC9F0));
         }
         if self.svc.has_real_debrid() {
             row = row.child(chip("⚡ Real-Debrid streams", 0x4CC9F022, 0x4CC9F0));

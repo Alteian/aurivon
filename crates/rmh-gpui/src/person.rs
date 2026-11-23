@@ -134,7 +134,8 @@ impl MediaHubView {
             }
             let c = card.clone();
             let t = &card.title;
-            let local = self.disc.local_ids.contains(&(t.kind, t.tmdb_id));
+            let avail = self.title_availability(t.kind, t.tmdb_id);
+            let local = avail.local;
             list = list.child(
                 div()
                     .id(SharedString::from(format!("credit-{i}")))
@@ -158,7 +159,8 @@ impl MediaHubView {
                             .child(div().text_sm().font_weight(FontWeight::MEDIUM).truncate().child(t.name.clone()))
                             .child(div().text_xs().text_color(rgb(p.muted)).truncate().child(role.clone())),
                     )
-                    .when(local, |d| d.child(chip("In library", 0x5FD39A22, p.good)))
+                    .when(local, |d| d.child(chip("On device", 0x5FD39A22, p.good)))
+                    .when(avail.in_collection && !local, |d| d.child(chip("Collection", 0x4CC9F022, 0x4CC9F0)))
                     .child(chip(if t.kind == TitleKind::Tv { "Series" } else { "Movie" }, 0xFFFFFF10, p.muted))
                     .when_some(t.rating.filter(|r| *r > 0.0), |d, r| d.child(div().w(px(44.0)).text_xs().text_color(rgb(p.warn)).child(format!("★ {r:.1}")))),
             );

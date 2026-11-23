@@ -6,7 +6,7 @@ A lightweight, high-performance media center application built entirely in Rust.
 
 - 🎬 **Native GPU-accelerated UI** - GPUI (the Zed UI framework), GPU-rendered
 - 🔌 **Extensible Addon System** - HTTP addon protocol (manifest, catalogs, streams)
-- 📂 **Library Management** - Scan directories for video and audio files
+- 📂 **Library (on this device)** - Scan folders for video and audio files; separate from Lists/Watchlist (online streaming shelf)
 - ⏯️ **In-app playback controls** - Play/pause, seek, ±10s, volume, stop, resume where you left off
 - 🎯 **Metadata Fetching** - Automatic metadata from TMDB (The Movie Database)
 - ▶️ **Hardware-Accelerated Playback** - Uses MPV with `--hwdec=auto`
@@ -153,9 +153,24 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup update
 ```
 
-## Building
+Product research and feature backlog (community needs vs Aurivon): [`docs/PRODUCT_RESEARCH.md`](docs/PRODUCT_RESEARCH.md).
 
-### Development Build
+## Platforms
+
+Aurivon is a **desktop** app (GPUI + mpv):
+
+| Platform | Status |
+|----------|--------|
+| Linux (x86_64) | Supported (release `.tar.gz`) |
+| Windows (x86_64) | Supported (Setup + portable zip) |
+| macOS | Build-from-source possible; not a CI release artifact yet |
+| **Android (APK)** | **Not supported** |
+
+There is no Android NDK target, Gradle project, or APK packaging. An APK would need a mobile GPUI (or other) UI, an Android player backend (not desktop mpv embed), SAF/MediaStore for libraries, and a new CI pipeline. That is a separate product track, not something `cargo build` or the current release scripts produce.
+
+### Building
+
+#### Development Build
 
 ```bash
 # Clone the repository
@@ -169,7 +184,7 @@ cargo build
 RUST_LOG=debug cargo run
 ```
 
-### Release Build (Optimized)
+#### Release Build (Optimized)
 
 ```bash
 cargo build --release
@@ -285,11 +300,15 @@ tags, pushes and creates the GitHub release. CI then attaches
    cargo run --release
    ```
 
-2. **Add a library:** On the Library page (or Settings → Libraries) type a folder path
+2. **Add folders (Library):** On the Library page (or Settings → Libraries) type a folder path
    such as `~/Videos` and press Enter / **Add**, or click **Browse...** to pick one.
+   **Library = files on this device.** Your online queue lives under **Lists** (★) —
+   watchlist and Trakt named lists. “On device” badges mean a matched local file, not
+   Trakt collection.
 
 3. **Scan:** the folder is scanned recursively right after adding it. Use **Scan** in
-   Settings to pick up new files later, and **Refresh** to reload the grid.
+   Settings to pick up new files later, and **Refresh** to reload the grid. Use
+   **Matched / Unmatched** on Library to find files that still need a TMDB link.
 
 4. **Play:** double-click a card (single click opens the TMDB details page with
    seasons/episodes). Video plays **inside the app window** (mpv draws into an X11

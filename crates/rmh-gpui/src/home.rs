@@ -25,6 +25,46 @@ impl MediaHubView {
         v
     }
 
+    /// Virtual shelves from on-disk files (`smart:unwatched` / `smart:recent` / `smart:uhd`).
+    pub(crate) fn smart_collection_entries(&self, key: &str) -> Vec<&LibraryEntry> {
+        match key {
+            "smart:unwatched" => {
+                let mut v: Vec<&LibraryEntry> = self.entries.iter().filter(|e| !e.item.watched).collect();
+                v.sort_by(|a, b| b.item.updated_at.cmp(&a.item.updated_at));
+                v.truncate(16);
+                v
+            }
+            "smart:recent" => self.recent_entries(),
+            "smart:uhd" => {
+                let is_uhd = |e: &LibraryEntry| {
+                    let n = format!("{} {}", e.item.file_name, e.item.file_path).to_lowercase();
+                    n.contains("2160p") || n.contains("uhd") || n.contains("4k") || n.contains("3840")
+                };
+                let mut v: Vec<&LibraryEntry> = self.entries.iter().filter(|e| is_uhd(e)).collect();
+                v.sort_by(|a, b| b.item.created_at.cmp(&a.item.created_at));
+                v.truncate(16);
+                v
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    pub(crate) fn effective_card_size(&self) -> String {
+        if self.svc.config().couch_mode {
+            "l".into()
+        } else {
+            self.svc.config().card_size.clone()
+        }
+    }
+
+    pub(crate) fn poster_width(&self, base: f32) -> f32 {
+        match self.effective_card_size().as_str() {
+            "s" => base * 0.85,
+            "l" => base * 1.2,
+            _ => base,
+        }
+    }
+
     pub(crate) fn home_page(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
         let layout = self.svc.config().home_layout;
         // Layout is chosen in Settings → Appearance (Ctrl+L still cycles).
@@ -82,10 +122,10 @@ impl MediaHubView {
         let mut col = div().flex().flex_col().gap_8();
         if cfg.home_row_visible("continue") {
             col = col.child(self.section(
-                "Continue watching",
+                "Continue on device",
                 Some(format!("{} in progress", cont.len())),
                 if cont.is_empty() {
-                    div().text_sm().text_color(rgb(p.muted)).child("Nothing in progress. Start something below.").into_any_element()
+                    div().text_sm().text_color(rgb(p.muted)).child("Nothing in progress on this device. Start something below.").into_any_element()
                 } else {
                     self.row("cont", cont.iter().take(12).map(|e| self.wide_entry_card(e, "cont", p, cx)).collect())
                 },
@@ -202,7 +242,7 @@ impl MediaHubView {
         let cont = self.continue_entries();
         if !cont.is_empty() {
             col = col.child(self.section(
-                "Continue watching",
+                "Continue on device",
                 None,
                 self.row("bcont", cont.iter().take(10).map(|e| self.entry_card(e, "bcont", 140.0, p, cx)).collect()),
                 p,
@@ -229,31 +269,42 @@ impl MediaHubView {
     /// C: library grid first, small continue row on top
     fn home_library(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
         if self.entries.is_empty() {
-            return self.empty_state("Your library is empty", "Add a folder to fill this grid.", p, cx);
+            return self.empty_state(
+                "Nothing on this device yet",
+                "Add a folder to fill this grid. Online queues live under Lists (★).",
+                p,
+                cx,
+            );
         }
         let cont = self.continue_entries();
         let mut col = div().flex().flex_col().gap_6();
         if !cont.is_empty() {
             col = col.child(self.section(
-                "Continue watching",
+                "Continue on device",
                 None,
                 self.row("ccont", cont.iter().take(4).map(|e| self.wide_entry_card(e, "ccont", p, cx)).collect()),
                 p,
             ));
         }
         let all: Vec<&LibraryEntry> = self.entries.iter().collect();
-        col.child(self.section("Library", Some(format!("{} items", self.entries.len())), self.grid(self.library_cards(&all, "home", p, cx)), p))
-            .into_any_element()
+        col.child(self.section(
+            "On this device",
+            Some(format!("{} files in your folders", self.entries.len())),
+            self.grid(self.library_cards(&all, "home", p, cx)),
+            p,
+        ))
+        .into_any_element()
     }
 
     /// Movies as cards, each series collapsed into one show card
     pub(crate) fn library_cards(&self, entries: &[&LibraryEntry], key: &str, p: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let w = self.poster_width(168.0);
         let mut shows: BTreeMap<i64, Vec<&LibraryEntry>> = BTreeMap::new();
         let mut cards: Vec<(String, AnyElement)> = vec![];
         for e in entries {
             match (e.kind(), e.link.as_ref().and_then(|l| l.tmdb_id)) {
                 (Some(TitleKind::Tv), Some(id)) => shows.entry(id).or_default().push(e),
-                _ => cards.push((e.display_title().to_lowercase(), self.entry_card(e, key, 168.0, p, cx))),
+                _ => cards.push((e.display_title().to_lowercase(), self.entry_card(e, key, w, p, cx))),
             }
         }
         for (_, eps) in shows {
@@ -264,9 +315,10 @@ impl MediaHubView {
                 .first()
                 .map(|e| e.item.id)
                 .unwrap_or(first.item.id);
+            let couch_on = self.svc.config().couch_mode && self.couch_focus == Some(open_id);
             let card = div()
                 .id(SharedString::from(format!("show-{key}-{}", first.item.id)))
-                .w(px(168.0))
+                .w(px(w))
                 .flex_none()
                 .flex()
                 .flex_col()
@@ -276,12 +328,13 @@ impl MediaHubView {
                 .child(
                     div()
                         .relative()
-                        .h(px(252.0))
+                        .h(px(w * 1.5))
                         .w_full()
                         .rounded_xl()
                         .overflow_hidden()
                         .border_1()
-                        .border_color(rgb(p.border_soft))
+                        .border_color(rgb(if couch_on { p.accent } else { p.border_soft }))
+                        .when(couch_on, |d| d.border_2().shadow_md())
                         .hover(|s| s.border_color(rgb(p.accent)))
                         .child(poster(&title, first.poster(), None))
                         .child(div().absolute().top_2().left_2().child(chip("SERIES", 0x000000AA, p.text)))
@@ -303,11 +356,19 @@ impl MediaHubView {
 
     pub(crate) fn library_page(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
         if self.entries.is_empty() && self.libraries.is_empty() {
-            return self.empty_state("Your library is empty", "Type a folder path or browse for one. It's scanned right away.", p, cx);
+            return self.empty_state(
+                "Nothing on this device yet",
+                "Add a folder with movies or shows. Library is only files on disk — use Lists (★) for your online watchlist.",
+                p,
+                cx,
+            );
         }
         let cfg = self.svc.config();
         let items = self.filtered_entries(cx);
         let count = items.len();
+        let folders = self.libraries.len();
+        let matched = self.entries.iter().filter(|e| rmh_app::entry_is_matched(e)).count();
+        let unmatched = self.entries.len().saturating_sub(matched);
         let type_pills: Vec<AnyElement> = [("all", "All"), ("movie", "Movies"), ("tv", "Shows"), ("other", "Other")]
             .iter()
             .map(|(id, label)| {
@@ -320,6 +381,29 @@ impl MediaHubView {
                     .into_any_element()
             })
             .collect();
+        let match_pills: Vec<AnyElement> = [("all", "All files"), ("matched", "Matched"), ("unmatched", "Unmatched")]
+            .iter()
+            .map(|(id, label)| {
+                let id = (*id).to_string();
+                self.pill(SharedString::from(format!("lib-match-{id}")), (*label).to_string(), cfg.library_match_filter == id, p)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        let id = id.clone();
+                        this.update_config(|c| c.library_match_filter = id, false, cx);
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+        let status = if items.is_empty() && cfg.library_match_filter == "unmatched" {
+            "No unmatched files — everything is linked to TMDB.".into()
+        } else if items.is_empty() && cfg.library_match_filter == "matched" {
+            "No matched files yet — run Re-match or check your TMDB key.".into()
+        } else if cfg.library_match_filter == "unmatched" {
+            format!("{count} unmatched · stream search needs a TMDB match · Re-match or fix filenames")
+        } else if cfg.couch_mode {
+            format!("{count} shown · couch mode · ←→↑↓ move · Enter open · double-click play")
+        } else {
+            format!("{count} shown · {folders} folders · {matched} matched · {unmatched} unmatched · click details, double-click play")
+        };
         div()
             .flex()
             .flex_col()
@@ -330,15 +414,36 @@ impl MediaHubView {
                     .items_center()
                     .justify_between()
                     .gap_4()
-                    .child(div().w(px(320.0)).child(Input::new(&self.filter_input).w_full()))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().text_sm().text_color(rgb(p.muted)).child("On this device"))
+                            .child(div().w(px(320.0)).child(Input::new(&self.filter_input).w_full())),
+                    )
                     .child(self.add_library_row(p, cx)),
             )
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap_2()
                     .children(type_pills)
+                    .children(match_pills)
+                    .child(
+                        self.pill("lib-hide-anime", "Hide anime", cfg.hide_anime, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.update_config(|c| c.hide_anime = !c.hide_anime, false, cx);
+                            this.load_trending(cx);
+                            this.load_watchlist(cx);
+                            this.status = Some(if this.svc.config().hide_anime {
+                                "Anime hidden from discovery, search, lists and calendar".into()
+                            } else {
+                                "Anime shown again".into()
+                            });
+                        })),
+                    )
                     .child(
                         self.pill("lib-hide-watched", "Hide watched", cfg.library_hide_watched, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
                             this.update_config(|c| c.library_hide_watched = !c.library_hide_watched, false, cx);
@@ -346,8 +451,16 @@ impl MediaHubView {
                     )
                     .child(self.button("lib-rematch", "Re-match", false, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.match_library(true, cx)))),
             )
-            .child(div().text_sm().text_color(rgb(p.muted)).child(format!("{count} files · click for details, double-click to play")))
-            .child(self.grid(self.library_cards(&items, "lib", p, cx)))
+            .child(div().text_sm().text_color(rgb(p.muted)).child(status))
+            .child(if items.is_empty() {
+                div()
+                    .text_sm()
+                    .text_color(rgb(p.muted))
+                    .child("No files match these filters.")
+                    .into_any_element()
+            } else {
+                self.grid(self.library_cards(&items, "lib", p, cx))
+            })
             .into_any_element()
     }
 

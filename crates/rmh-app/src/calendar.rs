@@ -109,6 +109,7 @@ impl MediaService {
         let http = self.inner.http.clone();
         let images = self.inner.image_dir.clone();
         let region = cfg.region.clone();
+        let hide_anime = cfg.hide_anime;
         let watch: HashSet<(Kind, i32)> = self.watchlist().iter().map(|w| (w.title.kind, w.title.tmdb_id)).collect();
         let lib = self.library_tmdb_ids();
         let svc = self.clone();
@@ -121,7 +122,8 @@ impl MediaService {
                 None => false,
             };
             let source = if use_trakt { "Trakt" } else { "TMDB" };
-            let cache = svc.calendar_cache(&format!("{source}-{year}-{month:02}-{region}"));
+            let anime_key = if hide_anime { "-noanime" } else { "" };
+            let cache = svc.calendar_cache(&format!("{source}-{year}-{month:02}-{region}{anime_key}"));
             if !force {
                 let fresh = std::fs::metadata(&cache)
                     .ok()
@@ -149,7 +151,10 @@ impl MediaService {
                 }
             }
             items.retain(|i| i.date >= start && i.date <= end);
-            attach_posters(&tmdb, &http, &images, &mut items).await;
+            attach_posters(&tmdb, &http, &images, &mut items, hide_anime).await;
+            if hide_anime {
+                items.retain(|i| !i.title.as_ref().is_some_and(|t| t.looks_like_anime()));
+            }
             items.sort_by(|a, b| a.date.cmp(&b.date).then(b.mine.cmp(&a.mine)).then(a.time.cmp(&b.time)).then(a.name.cmp(&b.name)));
             let month = CalendarMonth { year, month, grid_start: Some(month_grid(year, month).0), items, source: source.into() };
             if let Some(d) = cache.parent() {
@@ -333,7 +338,7 @@ async fn tmdb_items(
     Ok(out)
 }
 
-async fn attach_posters(tmdb: &TmdbClient, http: &reqwest::Client, images: &std::path::Path, items: &mut [CalendarItem]) {
+async fn attach_posters(tmdb: &TmdbClient, http: &reqwest::Client, images: &std::path::Path, items: &mut [CalendarItem], hide_anime: bool) {
     // titles we don't have yet (Trakt items) – details are cached on disk
     let missing: Vec<(Kind, i32)> = {
         let mut s: Vec<(Kind, i32)> =
@@ -367,7 +372,7 @@ async fn attach_posters(tmdb: &TmdbClient, http: &reqwest::Client, images: &std:
             uniq.push(t);
         }
     }
-    let cards = with_posters(uniq, http, images).await;
+    let cards = with_posters(uniq, http, images, hide_anime).await;
     let posters: HashMap<(Kind, i32), PathBuf> =
         cards.into_iter().filter_map(|c| Some(((c.title.kind, c.title.tmdb_id), c.poster?))).collect();
     for it in items.iter_mut() {

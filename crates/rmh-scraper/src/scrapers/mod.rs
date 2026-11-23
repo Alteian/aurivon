@@ -291,10 +291,11 @@ impl ScraperManager {
         map.insert(name.to_string(), enabled);
     }
 
-    /// Search all enabled scrapers
-    pub async fn search_all(&self, query: &SearchQuery) -> Vec<ScrapedResult> {
+    /// Search all enabled scrapers. Returns hits plus per-source warnings (timeouts, HTTP errors).
+    pub async fn search_all(&self, query: &SearchQuery) -> (Vec<ScrapedResult>, Vec<String>) {
         let enabled = self.enabled_scrapers.read().await;
         let mut all_results = Vec::new();
+        let mut warnings = Vec::new();
         let mut handles = Vec::new();
 
         for scraper in &self.scrapers {
@@ -312,11 +313,11 @@ impl ScraperManager {
                 match scraper.search(&query).await {
                     Ok(results) => {
                         debug!("Scraper {} found {} results", name, results.len());
-                        results
+                        (results, None)
                     }
                     Err(e) => {
                         warn!("Scraper {} failed: {}", name, e);
-                        Vec::new()
+                        (Vec::new(), Some(format!("{name}: {e}")))
                     }
                 }
             }));
@@ -324,13 +325,16 @@ impl ScraperManager {
 
         // Collect all results
         for handle in handles {
-            if let Ok(results) = handle.await {
+            if let Ok((results, warn)) = handle.await {
                 all_results.extend(results);
+                if let Some(w) = warn {
+                    warnings.push(w);
+                }
             }
         }
 
         info!("Total scraped results: {}", all_results.len());
-        all_results
+        (all_results, warnings)
     }
 
     /// Get list of available scrapers

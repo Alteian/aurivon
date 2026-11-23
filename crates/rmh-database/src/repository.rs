@@ -416,6 +416,9 @@ pub struct MediaLink {
     pub poster_path: Option<String>,
     pub genres: Option<String>,
     pub trakt_synced_at: Option<String>,
+    /// 1 = user locked this match; force rematch skips it
+    #[sqlx(default)]
+    pub match_locked: i64,
 }
 
 impl<'a> MediaRepository<'a> {
@@ -423,13 +426,15 @@ impl<'a> MediaRepository<'a> {
         sqlx::query(
             r#"
             INSERT INTO media_links (media_id, kind, tmdb_id, imdb_id, show_title, season, episode,
-                                     episode_title, poster_path, genres, matched_at, trakt_synced_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                     episode_title, poster_path, genres, matched_at, trakt_synced_at, match_locked)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(media_id) DO UPDATE SET
                 kind = excluded.kind, tmdb_id = excluded.tmdb_id, imdb_id = excluded.imdb_id,
                 show_title = excluded.show_title, season = excluded.season, episode = excluded.episode,
                 episode_title = excluded.episode_title, poster_path = excluded.poster_path,
-                genres = excluded.genres, matched_at = excluded.matched_at
+                genres = excluded.genres, matched_at = excluded.matched_at,
+                match_locked = excluded.match_locked,
+                trakt_synced_at = COALESCE(media_links.trakt_synced_at, excluded.trakt_synced_at)
             "#,
         )
         .bind(&link.media_id)
@@ -444,16 +449,27 @@ impl<'a> MediaRepository<'a> {
         .bind(&link.genres)
         .bind(Utc::now().to_rfc3339())
         .bind(&link.trakt_synced_at)
+        .bind(link.match_locked)
         .execute(self.pool)
         .await
         .context("Failed to save media link")?;
         Ok(())
     }
 
+    pub async fn set_match_locked(&self, media_id: Uuid, locked: bool) -> Result<()> {
+        sqlx::query("UPDATE media_links SET match_locked = ? WHERE media_id = ?")
+            .bind(if locked { 1i64 } else { 0i64 })
+            .bind(media_id.to_string())
+            .execute(self.pool)
+            .await
+            .context("Failed to set match lock")?;
+        Ok(())
+    }
+
     pub async fn get_media_links(&self) -> Result<Vec<MediaLink>> {
         sqlx::query_as::<_, MediaLink>(
             "SELECT media_id, kind, tmdb_id, imdb_id, show_title, season, episode, episode_title, \
-             poster_path, genres, trakt_synced_at FROM media_links",
+             poster_path, genres, trakt_synced_at, COALESCE(match_locked, 0) AS match_locked FROM media_links",
         )
         .fetch_all(self.pool)
         .await

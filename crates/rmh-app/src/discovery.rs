@@ -91,6 +91,39 @@ pub fn library_ids(entries: &[LibraryEntry]) -> HashSet<(Kind, i32)> {
     entries.iter().filter_map(|e| Some((e.kind()?, e.link.as_ref()?.tmdb_id? as i32))).collect()
 }
 
+/// Whether a scanned file is linked to TMDB (stream search / online badges need this).
+pub fn entry_is_matched(e: &LibraryEntry) -> bool {
+    e.kind().is_some() && e.link.as_ref().and_then(|l| l.tmdb_id).is_some()
+}
+
+/// Offline vs online shelf signals for a TMDB title.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TitleAvailability {
+    /// Matched local file on disk
+    pub local: bool,
+    /// On the streaming watchlist (local JSON ± Trakt)
+    pub on_watchlist: bool,
+    /// In Trakt collection (“own digitally”) — not the same as on-disk
+    pub in_collection: bool,
+}
+
+impl TitleAvailability {
+    pub fn resolve(
+        kind: Kind,
+        tmdb_id: i32,
+        local_ids: &HashSet<(Kind, i32)>,
+        watch_ids: &HashSet<(Kind, i32)>,
+        collection_ids: &HashSet<(Kind, i32)>,
+    ) -> Self {
+        let key = (kind, tmdb_id);
+        Self {
+            local: local_ids.contains(&key),
+            on_watchlist: watch_ids.contains(&key),
+            in_collection: collection_ids.contains(&key),
+        }
+    }
+}
+
 async fn cache_many(http: &reqwest::Client, dir: &Path, items: Vec<(i32, String)>) -> HashMap<i32, PathBuf> {
     let mut set = JoinSet::new();
     for (id, url) in items {
@@ -129,6 +162,7 @@ impl MediaService {
         let tmdb = self.tmdb();
         let http = self.inner.http.clone();
         let images = self.inner.image_dir.clone();
+        let hide_anime = self.config().hide_anime;
         let svc = self.clone();
         self.run(async move {
             let tmdb = tmdb?;
@@ -138,7 +172,7 @@ impl MediaService {
             }
             if q.starts_with("tt") && q.len() > 3 && q[2..].chars().all(|c| c.is_ascii_digit()) {
                 let titles: Vec<Title> = tmdb.find_imdb(&q).await.map_err(|e| format!("{e:#}"))?.into_iter().collect();
-                return Ok(SearchHits { titles: with_posters(titles, &http, &images).await, ..Default::default() });
+                return Ok(SearchHits { titles: with_posters(titles, &http, &images, hide_anime).await, ..Default::default() });
             }
             let mut res = tmdb.search_all(&q).await.map_err(|e| format!("TMDB search failed: {e:#}"))?;
             let mut corrected = None;
@@ -196,7 +230,7 @@ impl MediaService {
             )
             .await;
             Ok(SearchHits {
-                titles: with_posters(titles, &http, &images).await,
+                titles: with_posters(titles, &http, &images, hide_anime).await,
                 people: people.into_iter().map(|p| PersonHit { photo: photos.get(&p.id).cloned(), card: p }).collect(),
                 corrected,
             })
@@ -232,11 +266,12 @@ impl MediaService {
         let tmdb = self.tmdb();
         let http = self.inner.http.clone();
         let images = self.inner.image_dir.clone();
+        let hide_anime = self.config().hide_anime;
         let svc = self.clone();
         self.run(async move {
             let p = tmdb?.list(kind, list, page).await.map_err(|e| format!("{e:#}"))?;
             svc.remember(&p.results);
-            Ok(BrowseResults { cards: with_posters(p.results, &http, &images).await, page: p.page, total_pages: p.total_pages, total_results: p.total_results })
+            Ok(BrowseResults { cards: with_posters(p.results, &http, &images, hide_anime).await, page: p.page, total_pages: p.total_pages, total_results: p.total_results })
         })
     }
 
@@ -245,11 +280,12 @@ impl MediaService {
         let tmdb = self.tmdb();
         let http = self.inner.http.clone();
         let images = self.inner.image_dir.clone();
+        let hide_anime = self.config().hide_anime;
         let svc = self.clone();
         self.run(async move {
             let p = tmdb?.recommendations(kind, tmdb_id).await.map_err(|e| format!("{e:#}"))?;
             svc.remember(&p.results);
-            Ok(BrowseResults { cards: with_posters(p.results, &http, &images).await, page: p.page, total_pages: p.total_pages, total_results: p.total_results })
+            Ok(BrowseResults { cards: with_posters(p.results, &http, &images, hide_anime).await, page: p.page, total_pages: p.total_pages, total_results: p.total_results })
         })
     }
 
@@ -258,12 +294,13 @@ impl MediaService {
         let tmdb = self.tmdb();
         let http = self.inner.http.clone();
         let images = self.inner.image_dir.clone();
+        let hide_anime = self.config().hide_anime;
         q.region = self.config().region;
         let svc = self.clone();
         self.run(async move {
             let p = tmdb?.discover(&q).await.map_err(|e| format!("{e:#}"))?;
             svc.remember(&p.results);
-            Ok(BrowseResults { cards: with_posters(p.results, &http, &images).await, page: p.page, total_pages: p.total_pages, total_results: p.total_results })
+            Ok(BrowseResults { cards: with_posters(p.results, &http, &images, hide_anime).await, page: p.page, total_pages: p.total_pages, total_results: p.total_results })
         })
     }
 
@@ -273,6 +310,7 @@ impl MediaService {
         let region = self.config().region;
         let http = self.inner.http.clone();
         let images = self.inner.image_dir.clone();
+        let hide_anime = self.config().hide_anime;
         let svc = self.clone();
         self.run(async move {
             let extras = tmdb?.extras(kind, tmdb_id, &region).await.map_err(|e| format!("{e:#}"))?;
@@ -292,7 +330,7 @@ impl MediaService {
             .await;
             svc.remember(&extras.recommendations);
             svc.remember(&extras.similar);
-            let recommended = with_posters(extras.recommendations.iter().take(16).cloned().collect(), &http, &images).await;
+            let recommended = with_posters(extras.recommendations.iter().take(16).cloned().collect(), &http, &images, hide_anime).await;
             // TMDB's "similar" list is noisy: keep titles people actually watched and rated
             let rec_ids: HashSet<i32> = extras.recommendations.iter().map(|t| t.tmdb_id).collect();
             let mut sim: Vec<Title> = extras
@@ -302,7 +340,7 @@ impl MediaService {
                 .cloned()
                 .collect();
             sim.sort_by(|a, b| b.votes.unwrap_or(0).cmp(&a.votes.unwrap_or(0)));
-            let similar = with_posters(sim.into_iter().take(16).collect(), &http, &images).await;
+            let similar = with_posters(sim.into_iter().take(16).collect(), &http, &images, hide_anime).await;
             Ok(TitleExtras { extras, photos, provider_logos, recommended, similar })
         })
     }
@@ -311,6 +349,7 @@ impl MediaService {
         let tmdb = self.tmdb();
         let http = self.inner.http.clone();
         let images = self.inner.image_dir.clone();
+        let hide_anime = self.config().hide_anime;
         self.run(async move {
             let person = tmdb?.person(id).await.map_err(|e| format!("{e:#}"))?;
             let photo = match person.profile_path.as_deref() {
@@ -328,8 +367,8 @@ impl MediaService {
                 })
             };
             let all: Vec<Credit> = person.credits.iter().filter(|c| !noise(&c.role) || c.department != "Acting" && c.department != "Crew").take(80).cloned().collect();
-            let known_for = with_posters(known_titles, &http, &images).await;
-            let cards = with_posters(all.iter().map(|c| c.title.clone()).collect(), &http, &images).await;
+            let known_for = with_posters(known_titles, &http, &images, hide_anime).await;
+            let cards = with_posters(all.iter().map(|c| c.title.clone()).collect(), &http, &images, hide_anime).await;
             let credits = cards.into_iter().zip(all).map(|(card, c)| (card, c.role, c.department)).collect();
             Ok(PersonPage { person, photo, known_for, credits })
         })

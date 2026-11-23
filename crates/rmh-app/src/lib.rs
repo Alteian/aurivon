@@ -27,12 +27,14 @@ pub mod migrate;
 
 pub use catalog::{next_episode, up_next, LibraryEntry, SeasonSummary, TitleCard, TitleKind};
 pub use calendar::{month_grid, CalendarItem, CalendarMonth, ReleaseKind};
-pub use config::{env_alias, env_flag, lang_code, AppConfig, HomeLayout, InstalledAddon, TraktWatchlistPolicy, VideoMode};
+pub use config::{
+    env_alias, env_flag, lang_code, smart_collection_builtins, AppConfig, HomeLayout, InstalledAddon, TraktWatchlistPolicy, VideoMode,
+};
 pub use storage::{repair_default_database, StorageBucket, StorageReport};
 pub use images::CacheUsage;
 pub use discovery::{
-    library_ids, search_library, BrowseResults, BrowseSort, CastMember, Credit, DiscoverQuery, Extras, Facets, Genre, ListKind,
-    PersonHit, PersonPage, Provider, SearchHits, TitleExtras, Video,
+    entry_is_matched, library_ids, search_library, BrowseResults, BrowseSort, CastMember, Credit, DiscoverQuery, Extras,
+    Facets, Genre, ListKind, PersonHit, PersonPage, Provider, SearchHits, TitleAvailability, TitleExtras, Video,
 };
 pub use streams::{AudioFilter, Codec, HdrFilter, Resolution, Source, StreamFilter, StreamSort, StreamTraits};
 pub use social::{ServiceStatus, SimklPin, WatchEvent};
@@ -43,7 +45,9 @@ pub use intro::IntroSegments;
 pub use addons::{CatalogEntry, RemoteMeta, RemoteStream};
 pub use rmh_services::opensubtitles::language_name as language_label;
 pub use rmh_services::simkl::Scrobble as SocialScrobble;
-pub use service::{expand_home, is_audio, MediaService, MovieHit, ResolvedStream, ServiceResult, StreamHit};
+pub use service::{
+    expand_home, is_audio, MediaService, MovieHit, ResolvedStream, ServiceResult, StreamHit, StreamSearchReport,
+};
 pub use session::{format_time, resume_position, NowPlaying, ProgressUpdate, TickOutcome};
 pub use trakt::{SyncReport, TraktAction, TraktEntry, TraktItem, TraktLists, TraktPkceLogin, TraktStatus};
 pub use rmh_trakt::{ShowProgress, UserList};

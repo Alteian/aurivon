@@ -175,8 +175,8 @@ impl Page {
     pub fn subtitle(self) -> &'static str {
         match self {
             Page::Home => "What to watch tonight",
-            Page::Library => "Everything in your local folders",
-            Page::Watchlist => "Watchlist and named Trakt lists",
+            Page::Library => "On this device — files in your folders",
+            Page::Watchlist => "Streaming shelf — watchlist and named Trakt lists",
             Page::Discover => "Trending, genres, filters and streaming services",
             Page::Calendar => "New episodes, premieres, cinema and digital releases",
             Page::Player => "",
@@ -272,6 +272,10 @@ pub struct MediaHubView {
     pub(crate) starting: Option<(String, Option<String>)>,
     pub(crate) stream_ctx: Option<StreamContext>,
     pub(crate) streams_loading: bool,
+    /// Soft-fail notes from the last stream search (Torrentio / addon)
+    pub(crate) stream_warnings: Vec<String>,
+    /// When set, next title pick from search links this library file to TMDB
+    pub(crate) linking_media: Option<Uuid>,
 
     // trakt
     pub(crate) trakt: TraktStatus,
@@ -323,6 +327,8 @@ pub struct MediaHubView {
     pub(crate) upd: crate::updates::UpdateUi,
 
     pub(crate) focus_handle: FocusHandle,
+    /// Couch mode: focused library entry for arrow-key navigation
+    pub(crate) couch_focus: Option<Uuid>,
     _poller: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -432,6 +438,8 @@ impl MediaHubView {
             streams: Vec::new(),
             stream_ctx: None,
             streams_loading: false,
+            stream_warnings: Vec::new(),
+            linking_media: None,
             trakt: TraktStatus::default(),
             trakt_waiting: false,
             trakt_lists: TraktLists::default(),
@@ -468,6 +476,7 @@ impl MediaHubView {
             disc,
             upd: Default::default(),
             focus_handle,
+            couch_focus: None,
             _poller: poller,
             _subscriptions: subscriptions,
         };
@@ -497,8 +506,15 @@ impl MediaHubView {
         if let Some(s) = cfg.sub_lang.as_ref().filter(|v| !v.trim().is_empty()) {
             extra.push(format!("--slang={}", s.trim()));
         }
+        if cfg.sub_delay.abs() > 0.001 {
+            extra.push(format!("--sub-delay={}", cfg.sub_delay));
+        }
+        if cfg.sub_forced_only {
+            extra.push("--sub-forced-only=yes".into());
+        }
         PlayerConfig {
             mpv_path: cfg.mpv_path(),
+            hwdec: cfg.mpv_hwdec.clone(),
             volume: volume.min(100.0) as u8,
             osc: cfg.mpv_osc,
             fullscreen: wid.is_none() && cfg.video_mode == VideoMode::Window && cfg.window_fullscreen,
@@ -764,12 +780,32 @@ impl MediaHubView {
         self.busy = Some(format!("Scanning {}…", lib.name));
         cx.notify();
         let fut = self.svc.scan_library(&lib);
+        let name = lib.name.clone();
         cx.spawn(async move |this, cx| {
+            let poller = this.clone();
+            let poll = cx.spawn(async move |cx| loop {
+                cx.background_executor().timer(Duration::from_millis(200)).await;
+                let cont = poller
+                    .update(cx, |this, cx| {
+                        if let Some(line) = this.svc.scan_status() {
+                            this.busy = Some(line);
+                            cx.notify();
+                            true
+                        } else {
+                            this.busy.as_ref().is_some_and(|b| b.starts_with("Scanning") || b.contains('/'))
+                        }
+                    })
+                    .unwrap_or(false);
+                if !cont {
+                    break;
+                }
+            });
             let res = fut.await;
+            let _ = poll.await;
             this.update(cx, |this, cx| {
                 this.busy = None;
                 match res {
-                    Ok(n) => this.status = Some(format!("Scan of “{}” complete · {} new", lib.name, n)),
+                    Ok(n) => this.status = Some(format!("Scan of “{name}” complete · {n} new")),
                     Err(e) => this.error = Some(e),
                 }
                 this.match_attempted = false;
@@ -804,12 +840,43 @@ impl MediaHubView {
         .detach();
     }
 
-    /// Library entries matching the filter box + type / watched filters
+    /// Offline/online shelf signals for a TMDB title.
+    pub(crate) fn title_availability(&self, kind: TitleKind, tmdb_id: i32) -> rmh_app::TitleAvailability {
+        rmh_app::TitleAvailability::resolve(kind, tmdb_id, &self.disc.local_ids, &self.disc.watch_ids, &self.disc.collection_ids)
+    }
+
+    /// Couch mode: arrow-key focus on the Library grid (columns ≈ 6).
+    pub(crate) fn couch_library_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let ids: Vec<Uuid> = self.filtered_entries(cx).iter().map(|e| e.item.id).collect();
+        if ids.is_empty() {
+            return false;
+        }
+        let cols = 6usize;
+        let cur = self.couch_focus.and_then(|id| ids.iter().position(|x| *x == id)).unwrap_or(0);
+        let next = match key {
+            "left" => cur.saturating_sub(1),
+            "right" => (cur + 1).min(ids.len() - 1),
+            "up" => cur.saturating_sub(cols),
+            "down" => (cur + cols).min(ids.len() - 1),
+            "enter" => {
+                let id = self.couch_focus.unwrap_or(ids[cur]);
+                self.open_entry(id, window, cx);
+                return true;
+            }
+            _ => return false,
+        };
+        self.couch_focus = Some(ids[next]);
+        cx.notify();
+        true
+    }
+
+    /// Library entries matching the filter box + type / watched / match filters
     pub(crate) fn filtered_entries(&self, cx: &App) -> Vec<&LibraryEntry> {
         let filter = self.filter_input.read(cx).value().to_lowercase();
         let cfg = self.svc.config();
         let hide_watched = cfg.library_hide_watched;
         let type_f = cfg.library_type_filter.clone();
+        let match_f = cfg.library_match_filter.clone();
         self.entries
             .iter()
             .filter(|e| {
@@ -826,6 +893,15 @@ impl MediaHubView {
                     _ => true,
                 };
                 if !type_ok {
+                    return false;
+                }
+                let matched = rmh_app::entry_is_matched(e);
+                let match_ok = match match_f.as_str() {
+                    "matched" => matched,
+                    "unmatched" => !matched,
+                    _ => true,
+                };
+                if !match_ok {
                     return false;
                 }
                 filter.is_empty()
@@ -905,8 +981,8 @@ impl MediaHubView {
                     cx.spawn(async move |this, cx| {
                         let res = fut.await;
                         this.update(cx, |this, cx| {
-                            if let Ok(streams) = res {
-                                this.next_ep_streams = streams;
+                            if let Ok(report) = res {
+                                this.next_ep_streams = report.hits;
                                 if !this.next_ep_streams.is_empty() {
                                     tracing::info!("Presearched {} streams for next episode", this.next_ep_streams.len());
                                 }
@@ -936,7 +1012,13 @@ impl MediaHubView {
             this.update(cx, |this, cx| {
                 this.busy = None;
                 match res {
-                    Ok(a) => this.status = Some(format!("Installed {}", a.name)),
+                    Ok(a) => {
+                        this.status = Some(if a.url.contains("torrentio") || a.name.to_lowercase().contains("torrentio") {
+                            format!("Installed {}. Built-in Torrentio turned off to avoid duplicate searches.", a.name)
+                        } else {
+                            format!("Installed {}", a.name)
+                        });
+                    }
                     Err(e) => this.error = Some(e),
                 }
                 cx.notify();
@@ -955,7 +1037,13 @@ impl MediaHubView {
             this.update(cx, |this, cx| {
                 this.busy = None;
                 match res {
-                    Ok(a) => this.status = Some(format!("Installed {}", a.name)),
+                    Ok(a) => {
+                        this.status = Some(if a.url.contains("torrentio") || a.name.to_lowercase().contains("torrentio") {
+                            format!("Installed {}. Built-in Torrentio turned off to avoid duplicate searches.", a.name)
+                        } else {
+                            format!("Installed {}", a.name)
+                        });
+                    }
                     Err(e) => this.error = Some(e),
                 }
                 cx.notify();
@@ -1137,7 +1225,60 @@ impl MediaHubView {
         for t in self.snap.tracks.iter_mut().filter(|t| t.kind == kind) {
             t.selected = Some(t.id) == id;
         }
+        // Dual: if enabled and primary changed, keep secondary on a different preferred lang track
+        if kind == rmh_app::TrackKind::Sub && self.svc.config().dual_subtitles {
+            if let Some(sec) = self.pick_secondary_sub(id) {
+                let _ = self.player.set_secondary_sub(Some(sec));
+                self.snap.secondary_sid = Some(sec);
+            }
+        }
         cx.notify();
+    }
+
+    /// Prefer a non-primary subtitle in the second preferred language (or any other track)
+    pub(crate) fn pick_secondary_sub(&self, primary: Option<i64>) -> Option<i64> {
+        let langs = self.svc.config().subtitle_languages();
+        let second_lang = langs.get(1).cloned();
+        let subs: Vec<_> = self.snap.tracks.iter().filter(|t| t.kind == rmh_app::TrackKind::Sub).collect();
+        if let Some(want) = second_lang {
+            if let Some(t) = subs.iter().find(|t| {
+                Some(t.id) != primary && t.lang.as_deref().map(rmh_app::lang_code).as_deref() == Some(want.as_str())
+            }) {
+                return Some(t.id);
+            }
+        }
+        subs.iter().find(|t| Some(t.id) != primary).map(|t| t.id)
+    }
+
+    pub(crate) fn select_secondary_sub(&mut self, id: Option<i64>, cx: &mut Context<Self>) {
+        let _ = self.player.set_secondary_sub(id);
+        self.snap.secondary_sid = id;
+        if id.is_some() {
+            self.update_config(|c| c.dual_subtitles = true, false, cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn nudge_sub_delay(&mut self, delta: f64, cx: &mut Context<Self>) {
+        let next = ((self.snap.sub_delay + delta) * 10.0).round() / 10.0;
+        let _ = self.player.set_sub_delay(next);
+        self.snap.sub_delay = next;
+        let _ = self.player.show_text(&format!("Sub delay {next:+.1}s"));
+        self.update_config(|c| c.sub_delay = next, false, cx);
+    }
+
+    pub(crate) fn reset_sub_delay(&mut self, cx: &mut Context<Self>) {
+        let _ = self.player.set_sub_delay(0.0);
+        self.snap.sub_delay = 0.0;
+        let _ = self.player.show_text("Sub delay 0.0s");
+        self.update_config(|c| c.sub_delay = 0.0, false, cx);
+    }
+
+    pub(crate) fn toggle_sub_forced_only(&mut self, cx: &mut Context<Self>) {
+        let on = !self.svc.config().sub_forced_only;
+        let _ = self.player.set_sub_forced_only(on);
+        let _ = self.player.show_text(if on { "Forced subs only" } else { "All subtitle events" });
+        self.update_config(|c| c.sub_forced_only = on, false, cx);
     }
 
     /// Keyboard: step to the next audio / subtitle track (subtitles wrap through "off")
@@ -1538,6 +1679,30 @@ impl MediaHubView {
 
     /// Open the details page for a TMDB title
     pub(crate) fn open_title(&mut self, card: &TitleCard, local: Option<Uuid>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(media_id) = self.linking_media.take() {
+            let kind = card.title.kind;
+            let tmdb = card.title.tmdb_id;
+            let name = card.title.name.clone();
+            self.busy = Some(format!("Linking to {name}…"));
+            let fut = self.svc.link_media_to_title(media_id, kind, tmdb);
+            cx.spawn(async move |this, cx| {
+                let res = fut.await;
+                this.update(cx, |this, cx| {
+                    this.busy = None;
+                    match res {
+                        Ok(()) => {
+                            this.status = Some(format!("Linked and locked match: {name}"));
+                            this.reload(cx);
+                        }
+                        Err(e) => this.error = Some(e),
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
         self.open_details(
             DetailsState {
                 kind: Some(card.title.kind),
@@ -1558,11 +1723,50 @@ impl MediaHubView {
         );
     }
 
+    /// Start Fix match: search TMDB, then pick a title to lock onto this file.
+    pub(crate) fn begin_fix_match(&mut self, media_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let hint = self
+            .entry(media_id)
+            .map(|e| e.display_title())
+            .unwrap_or_else(|| "title".into());
+        self.linking_media = Some(media_id);
+        self.discover_input.update(cx, |s, cx| {
+            s.set_value(&hint, window, cx);
+        });
+        self.status = Some(format!("Pick a TMDB match for “{hint}” (search, then click a title)"));
+        self.navigate(Page::Discover, window, cx);
+        self.search_discover(cx);
+    }
+
+    pub(crate) fn toggle_match_lock(&mut self, media_id: Uuid, cx: &mut Context<Self>) {
+        let locked = self
+            .entry(media_id)
+            .and_then(|e| e.link.as_ref())
+            .is_some_and(|l| l.match_locked != 0);
+        let fut = self.svc.set_match_locked(media_id, !locked);
+        cx.spawn(async move |this, cx| {
+            let res = fut.await;
+            this.update(cx, |this, cx| {
+                match res {
+                    Ok(()) => {
+                        this.status = Some(if locked { "Match unlocked".into() } else { "Match locked".into() });
+                        this.reload(cx);
+                    }
+                    Err(e) => this.error = Some(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Open details for a library entry (or play it if we know nothing more)
     pub(crate) fn open_entry(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         let Some(e) = self.entry(id).cloned() else { return };
         let (Some(kind), Some(tmdb)) = (e.kind(), e.link.as_ref().and_then(|l| l.tmdb_id)) else {
-            self.play_item(id, window, cx);
+            // Unmatched: offer Fix match instead of only playing
+            self.begin_fix_match(id, window, cx);
             return;
         };
         let season = e.link.as_ref().and_then(|l| l.season).map(|s| s as u32);
@@ -1588,6 +1792,7 @@ impl MediaHubView {
 
     fn open_details(&mut self, state: DetailsState, window: &mut Window, cx: &mut Context<Self>) {
         self.streams.clear();
+        self.stream_warnings.clear();
         self.stream_ctx = None;
         let (kind, id) = (state.kind, state.tmdb_id);
         if self.pending_play.is_some() && (kind, id) != self.pending_play.map(|(k, i)| (Some(k), Some(i))).unwrap_or_default() {
@@ -1742,17 +1947,32 @@ impl MediaHubView {
     pub(crate) fn load_streams(&mut self, imdb: String, episode: Option<(u32, u32)>, ctx: StreamContext, cx: &mut Context<Self>) {
         self.streams_loading = true;
         self.streams.clear();
+        self.stream_warnings.clear();
         self.stream_ctx = Some(ctx);
         self.error = None;
+        self.busy = Some(format!("Finding streams for {}…", self.stream_ctx.as_ref().map(|c| c.label.as_str()).unwrap_or("title")));
         let fut = self.svc.search_streams_for(imdb, episode);
         cx.spawn(async move |this, cx| {
             let res = fut.await;
             this.update(cx, |this, cx| {
                 this.streams_loading = false;
+                this.busy = None;
                 match res {
-                    Ok(s) => {
-                        this.status = Some(format!("{} streams found", s.len()));
-                        this.streams = s;
+                    Ok(report) => {
+                        this.stream_warnings = report.warnings;
+                        this.streams = report.hits;
+                        let n = this.streams.len();
+                        if n == 0 {
+                            this.status = Some(if this.stream_warnings.is_empty() {
+                                "No streams found".into()
+                            } else {
+                                format!("No streams found ({})", this.stream_warnings.join("; "))
+                            });
+                        } else if this.stream_warnings.is_empty() {
+                            this.status = Some(format!("{n} streams found"));
+                        } else {
+                            this.status = Some(format!("{n} streams found · {}", this.stream_warnings.join("; ")));
+                        }
                         if this.pending_play.is_some() {
                             this.autoplay_ready = true;
                         }
@@ -1876,9 +2096,11 @@ impl MediaHubView {
 
     fn load_trakt_lists(&mut self, cx: &mut Context<Self>) {
         let fut = self.svc.trakt_lists();
+        let coll_fut = self.svc.trakt_collection_ids();
         let svc = self.svc.clone();
         cx.spawn(async move |this, cx| {
             let Ok(lists) = fut.await else { return };
+            let collection_ids = coll_fut.await.unwrap_or_default();
             let map_ids = |entries: &[rmh_app::TraktEntry], n: usize| -> Vec<(TitleKind, i32)> {
                 entries
                     .iter()
@@ -1910,6 +2132,7 @@ impl MediaHubView {
                 this.trakt_cards = cards;
                 this.trakt_history_cards = history;
                 this.trakt_rec_cards = recs;
+                this.disc.collection_ids = collection_ids;
                 cx.notify();
             })
             .ok();
@@ -2053,6 +2276,7 @@ impl MediaHubView {
                 this.trakt_cards.clear();
                 this.trakt_history_cards.clear();
                 this.trakt_rec_cards.clear();
+                this.disc.collection_ids.clear();
                 this.trakt_sync_at = None;
                 this.status = Some("Disconnected from Trakt".into());
                 this.refresh_trakt(cx);
@@ -2252,6 +2476,7 @@ impl MediaHubView {
             let handled = match self.page {
                 Page::Discover => self.browse_key(ks.key.as_str(), ks.modifiers.shift, window, cx),
                 Page::Calendar => self.calendar_key(ks.key.as_str(), ks.modifiers.shift, window, cx),
+                Page::Library if self.svc.config().couch_mode => self.couch_library_key(ks.key.as_str(), window, cx),
                 // hero carousel on the streaming home
                 Page::Home if self.svc.config().home_layout.is_feed() && matches!(ks.key.as_str(), "left" | "right") => {
                     self.hero_step(if ks.key == "left" { -1 } else { 1 }, cx);
@@ -2269,7 +2494,12 @@ impl MediaHubView {
             }
         }
         // Enter on Home / Library resumes the top Continue Watching (or Up Next) item
-        if ks.key == "enter" && matches!(self.page, Page::Home | Page::Library) && self.focus_handle.is_focused(window) {
+        // (Library + couch mode uses couch_library_key for Enter instead)
+        if ks.key == "enter"
+            && matches!(self.page, Page::Home | Page::Library)
+            && self.focus_handle.is_focused(window)
+            && !(self.page == Page::Library && self.svc.config().couch_mode)
+        {
             if let Some(id) = self.resume_candidate() {
                 self.play_item(id, window, cx);
                 cx.stop_propagation();
@@ -2308,6 +2538,8 @@ impl MediaHubView {
             "i" => self.skip_segment(cx),
             "a" => self.cycle_track(rmh_app::TrackKind::Audio, cx),
             "j" => self.cycle_track(rmh_app::TrackKind::Sub, cx),
+            "z" => self.nudge_sub_delay(if shift { 0.1 } else { -0.1 }, cx),
+            "x" => self.nudge_sub_delay(if shift { -0.1 } else { 0.1 }, cx),
             "t" => self.cycle_side_tab(cx),
             // search OpenSubtitles for what's playing
             "o" => {

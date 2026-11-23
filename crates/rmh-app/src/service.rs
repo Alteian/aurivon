@@ -83,6 +83,13 @@ impl From<&ScrapedResult> for StreamHit {
     }
 }
 
+/// Stream search outcome: hits plus soft-fail notes (Torrentio down, addon HTTP errors).
+#[derive(Debug, Clone, Default)]
+pub struct StreamSearchReport {
+    pub hits: Vec<StreamHit>,
+    pub warnings: Vec<String>,
+}
+
 /// Where a resolved stream can be played from
 #[derive(Debug, Clone)]
 pub struct ResolvedStream {
@@ -105,6 +112,8 @@ pub(crate) struct Inner {
     pub(crate) torrent: Arc<Mutex<Option<Arc<TorrentEngine>>>>,
     /// What "Play" is doing right now (checking Real-Debrid, finding peers, buffering)
     pub(crate) start_status: Arc<RwLock<Option<String>>>,
+    /// Live library scan line for the top bar
+    pub(crate) scan_status: Arc<RwLock<Option<String>>>,
     pub(crate) trakt: RwLock<Option<rmh_trakt::TraktClient>>,
     pub(crate) http: reqwest::Client,
     /// Poster / still image cache
@@ -175,6 +184,7 @@ impl MediaService {
                 scraper: RwLock::new(None),
                 torrent: Arc::new(Mutex::new(None)),
                 start_status: Arc::new(RwLock::new(None)),
+                scan_status: Arc::new(RwLock::new(None)),
                 trakt: RwLock::new(None),
                 http,
                 tmdb_cache: cache_base.join("tmdb"),
@@ -345,17 +355,45 @@ impl MediaService {
         })
     }
 
-    /// Rescan a library; returns number of new items
+    /// Latest scan progress line (if a scan is running)
+    pub fn scan_status(&self) -> Option<String> {
+        self.inner.scan_status.read().ok().and_then(|s| s.clone())
+    }
+
+    /// Rescan a library; returns number of new items. Updates [`Self::scan_status`] while running.
     pub fn scan_library(&self, library: &Library) -> impl Future<Output = ServiceResult<usize>> + 'static {
         let (id, path) = (library.id, library.path.clone());
         let db = self.db();
+        let status = self.inner.scan_status.clone();
         self.run(async move {
+            if !Path::new(&path).is_dir() {
+                return Err(format!("Folder missing or not a directory: {path}"));
+            }
             let db = db.await?;
-            Scanner::new(db)
-                .scan_directory(id, Path::new(&path), None)
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<rmh_core::ScanProgress>(32);
+            let status_w = status.clone();
+            let progress_task = tokio::spawn(async move {
+                while let Some(p) = rx.recv().await {
+                    let line = if p.is_complete {
+                        None
+                    } else {
+                        Some(format!("Scanning {}/{} · {}", p.scanned_files, p.total_files, p.current_file))
+                    };
+                    if let Ok(mut g) = status_w.write() {
+                        *g = line;
+                    }
+                }
+            });
+            let result = Scanner::new(db)
+                .scan_directory(id, Path::new(&path), Some(tx))
                 .await
                 .map(|items| items.len())
-                .map_err(|e| format!("{e:#}"))
+                .map_err(|e| format!("{e:#}"));
+            let _ = progress_task.await;
+            if let Ok(mut g) = status.write() {
+                *g = None;
+            }
+            result
         })
     }
 
@@ -386,7 +424,7 @@ impl MediaService {
     }
 
     /// Find stream candidates for an IMDb id, best first
-    pub fn search_streams(&self, imdb_id: impl Into<String>) -> impl Future<Output = ServiceResult<Vec<StreamHit>>> + 'static {
+    pub fn search_streams(&self, imdb_id: impl Into<String>) -> impl Future<Output = ServiceResult<StreamSearchReport>> + 'static {
         self.search_streams_for(imdb_id, None)
     }
 
@@ -395,10 +433,12 @@ impl MediaService {
         &self,
         imdb_id: impl Into<String>,
         episode: Option<(u32, u32)>,
-    ) -> impl Future<Output = ServiceResult<Vec<StreamHit>>> + 'static {
+    ) -> impl Future<Output = ServiceResult<StreamSearchReport>> + 'static {
         let imdb_id: String = imdb_id.into();
         let scraper = self.inner.scraper.read().ok().and_then(|s| s.clone());
-        let addons = self.config().addons;
+        let cfg = self.config();
+        let torrentio_on = cfg.enable_torrentio;
+        let addons = cfg.addons;
         let http = self.inner.http.clone();
         self.run(async move {
             let scraper = scraper.ok_or("Scraper not initialised")?;
@@ -406,8 +446,8 @@ impl MediaService {
                 Some((s, e)) => SearchQuery::series(&imdb_id, "", s, e),
                 None => SearchQuery::movie(&imdb_id, ""),
             };
-            let results = scraper
-                .search(&query)
+            let (results, mut warnings) = scraper
+                .search_report(&query)
                 .await
                 .map_err(|e| format!("Stream search failed: {e}"))?;
             let mut hits: Vec<StreamHit> = results.iter().map(StreamHit::from).collect();
@@ -417,10 +457,17 @@ impl MediaService {
                 Some((s, e)) => ("series".to_string(), format!("{imdb_id}:{s}:{e}")),
                 None => ("movie".to_string(), imdb_id.clone()),
             };
-            for a in addons.into_iter().filter(|a| a.enabled) {
+            let enabled_addons: Vec<_> = addons.into_iter().filter(|a| a.enabled).collect();
+            if !torrentio_on && enabled_addons.is_empty() {
+                warnings.push(
+                    "Torrentio is off and no stream addons are enabled. Turn Torrentio on in Addons, or install a stream addon."
+                        .into(),
+                );
+            }
+            for a in &enabled_addons {
                 let url = format!("{}/stream/{}/{}.json", a.url.trim_end_matches('/'), ctype, sid);
-                if let Ok(resp) = http.get(&url).send().await {
-                    if resp.status().is_success() {
+                match http.get(&url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
                         if let Ok(body) = resp.json::<serde_json::Value>().await {
                             if let Some(streams) = body.get("streams").and_then(|s| s.as_array()) {
                                 for s in streams {
@@ -459,11 +506,13 @@ impl MediaService {
                             }
                         }
                     }
+                    Ok(resp) => warnings.push(format!("{}: HTTP {}", a.name, resp.status())),
+                    Err(e) => warnings.push(format!("{}: {e}", a.name)),
                 }
             }
 
             crate::streams::sort_best(&mut hits);
-            Ok(hits)
+            Ok(StreamSearchReport { hits, warnings })
         })
     }
 

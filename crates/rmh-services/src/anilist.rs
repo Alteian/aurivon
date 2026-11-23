@@ -137,6 +137,7 @@ impl AniListClient {
 }
 
 /// TMDB doesn't flag anime; Japanese-language animation is the usual heuristic
+/// Same rule as discovery hide-anime: Japanese + TMDB Animation (16).
 pub fn looks_like_anime(original_language: Option<&str>, genre_ids: &[i32]) -> bool {
     original_language == Some("ja") && genre_ids.contains(&16)
 }

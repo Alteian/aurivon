@@ -73,6 +73,12 @@ impl MediaHubView {
         for lib in &self.libraries {
             let (id, scan_lib) = (lib.id, lib.clone());
             let count = self.entries.iter().filter(|e| e.item.file_path.starts_with(&lib.path)).count();
+            let path_ok = std::path::Path::new(&lib.path).is_dir();
+            let path_line = if path_ok {
+                format!("{} · {count} items", lib.path)
+            } else {
+                format!("{} · folder missing or disconnected · {count} items still in library", lib.path)
+            };
             libs = libs.child(
                 div()
                     .flex()
@@ -89,7 +95,13 @@ impl MediaHubView {
                             .flex()
                             .flex_col()
                             .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(lib.name.clone()))
-                            .child(div().text_xs().text_color(rgb(p.muted)).truncate().child(format!("{} · {count} items", lib.path))),
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(if path_ok { p.muted } else { p.danger }))
+                                    .truncate()
+                                    .child(path_line),
+                            ),
                     )
                     .child(
                         self.button(SharedString::from(format!("scan-{id}")), "Rescan", false, p)
@@ -153,6 +165,72 @@ impl MediaHubView {
                     .child(div().flex_1().child(self.field("Preferred audio languages", "mpv --alang, comma separated", &self.alang_input, p)))
                     .child(div().flex_1().child(self.field("Preferred subtitle languages", "mpv --slang, comma separated", &self.slang_input, p))),
             )
+            .child(
+                self.toggle_row(
+                    "tg-forced-set",
+                    "Forced subtitles only",
+                    "Prefer forced events (signs, non-player language). Also in the player Subs panel.",
+                    cfg.sub_forced_only,
+                    p,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                    this.update_config(|c| c.sub_forced_only = !c.sub_forced_only, false, cx)
+                })),
+            )
+            .child(
+                self.toggle_row(
+                    "tg-dual-set",
+                    "Dual subtitles",
+                    "When you pick a primary track, also enable a secondary in your second preferred language",
+                    cfg.dual_subtitles,
+                    p,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                    this.update_config(|c| c.dual_subtitles = !c.dual_subtitles, false, cx)
+                })),
+            )
+            .child({
+                let cur = cfg.mpv_hwdec.as_str();
+                let mut row = div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .flex_wrap()
+                    .child(div().w(px(120.0)).text_sm().font_weight(FontWeight::MEDIUM).child("hwdec"));
+                for mode in ["auto", "no", "vaapi", "nvdec", "d3d11va"] {
+                    let on = cur == mode;
+                    let mode_s = mode.to_string();
+                    row = row.child(
+                        self.pill(SharedString::from(format!("hwdec-{mode}")), mode.to_string(), on, p).on_click(
+                            cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                                let mode_s = mode_s.clone();
+                                this.update_config(|c| c.mpv_hwdec = mode_s, true, cx);
+                            }),
+                        ),
+                    );
+                }
+                row
+            })
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(p.faint))
+                    .child("Hardware decode applies on the next play. See Player → Speed for live Decode / Video (HDR) status."),
+            )
+            .when(cfg.sub_delay.abs() > 0.001, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().text_sm().text_color(rgb(p.muted)).child(format!("Remembered sub delay {:+.1}s", cfg.sub_delay)))
+                        .child(
+                            self.button("sub-delay-clear", "Reset", false, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                this.update_config(|c| c.sub_delay = 0.0, false, cx);
+                            })),
+                        ),
+                )
+            })
             .child(self.field("mpv executable", "Leave as mpv to use the one on PATH.", &self.mpv_input, p));
 
         // Services (Trakt setup is on the Addons page)
@@ -221,7 +299,7 @@ impl MediaHubView {
                 if self.svc.has_real_debrid() { "Real-Debrid: configured" } else { "Real-Debrid: not configured (P2P only)" }.into(),
             ))
             .child(div().text_xs().text_color(rgb(p.faint)).child(
-                "Keys: Ctrl+K or / search · Space/K play · ←/→ 10 s (Shift 60 s) · ↑/↓ volume · ,/. frame · [/] speed · PgUp/PgDn next/prev chapter · I skip intro · A audio · J subtitles · O OpenSubtitles · T panel tab · N next episode · F fullscreen (player) · F11 fullscreen (anywhere) · M mute · S stop · Enter resume · Ctrl+1–9 Home/Movies/Series/Calendar/Watchlist/Library/Playing/Addons/Settings · ←/→ hero (Home) · Ctrl+L home layout · Ctrl+I details",
+                "Keys: Ctrl+K or / search · Space/K play · ←/→ 10 s (Shift 60 s) · ↑/↓ volume · ,/. frame · [/] speed · z/x sub delay · PgUp/PgDn next/prev chapter · I skip intro · A audio · J subtitles · O OpenSubtitles · T panel tab · N next episode · F fullscreen (player) · F11 fullscreen (anywhere) · M mute · S stop · Enter resume · Ctrl+1–9 Home/Movies/Series/Calendar/Watchlist/Library/Playing/Addons/Settings · ←/→ hero (Home) · Ctrl+L home layout · Ctrl+I details",
             ));
 
         let mut cats = div().flex().flex_wrap().gap_3();
@@ -410,45 +488,214 @@ impl MediaHubView {
 
     fn home_rows_card(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let cfg = self.svc.config();
-        let rows = [
+        let label_for = |key: &str| -> String {
+            match key {
+                "continue" => "Continue watching".into(),
+                "up_next" => "Up next".into(),
+                "watchlist" => "Watchlist".into(),
+                "trakt_playback" => "Continue on Trakt".into(),
+                "trending" => "Trending".into(),
+                "library" => "On this device".into(),
+                k if k.starts_with("smart:") => rmh_app::smart_collection_builtins()
+                    .iter()
+                    .find(|(id, _)| *id == k)
+                    .map(|(_, label)| (*label).into())
+                    .unwrap_or_else(|| k.to_string()),
+                k if k.starts_with("trakt_list:") => {
+                    let id = &k["trakt_list:".len()..];
+                    self.disc
+                        .lists
+                        .cache
+                        .lists
+                        .iter()
+                        .find(|l| rmh_app::MediaService::user_list_id(l) == id)
+                        .map(|l| format!("List · {}", l.name))
+                        .unwrap_or_else(|| format!("List · {id}"))
+                }
+                other => other.to_string(),
+            }
+        };
+        let mut builtins: Vec<(&str, &str)> = vec![
             ("continue", "Continue watching"),
             ("up_next", "Up next"),
             ("watchlist", "Watchlist"),
             ("trakt_playback", "Continue on Trakt"),
             ("trending", "Trending"),
-            ("library", "Library grid"),
+            ("library", "On this device"),
         ];
-        let mut body = div().flex().flex_wrap().gap_2();
-        for (key, label) in rows {
-            let key = key.to_string();
-            let on = cfg.home_row_visible(&key);
-            body = body.child(
-                self.pill(SharedString::from(format!("home-row-{key}")), label.to_string(), on, p).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                    let key = key.clone();
-                    this.update_config(
-                        move |c| {
-                            if c.home_rows.iter().any(|r| r == &key) {
-                                c.home_rows.retain(|r| r != &key);
-                            } else {
-                                c.home_rows.push(key);
-                            }
-                        },
-                        false,
-                        cx,
-                    );
-                })),
+        builtins.extend(rmh_app::smart_collection_builtins().iter().copied());
+
+        let mut ordered = div().flex().flex_col().gap_2();
+        for (i, key) in cfg.home_rows.iter().enumerate() {
+            let key_s = key.clone();
+            let key_up = key.clone();
+            let key_dn = key.clone();
+            let at_top = i == 0;
+            let at_bot = i + 1 >= cfg.home_rows.len();
+            ordered = ordered.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .rounded_lg()
+                    .bg(rgb(p.surface_raised))
+                    .child(div().flex_1().min_w_0().text_sm().child(label_for(key)))
+                    .child(
+                        self.button(SharedString::from(format!("hr-up-{i}")), "↑", false, p)
+                            .when(at_top, |b| b.opacity(0.35))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                                if at_top {
+                                    return;
+                                }
+                                let key = key_up.clone();
+                                this.update_config(
+                                    move |c| {
+                                        if let Some(pos) = c.home_rows.iter().position(|r| r == &key) {
+                                            if pos > 0 {
+                                                c.home_rows.swap(pos, pos - 1);
+                                            }
+                                        }
+                                    },
+                                    false,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        self.button(SharedString::from(format!("hr-dn-{i}")), "↓", false, p)
+                            .when(at_bot, |b| b.opacity(0.35))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                                if at_bot {
+                                    return;
+                                }
+                                let key = key_dn.clone();
+                                this.update_config(
+                                    move |c| {
+                                        if let Some(pos) = c.home_rows.iter().position(|r| r == &key) {
+                                            if pos + 1 < c.home_rows.len() {
+                                                c.home_rows.swap(pos, pos + 1);
+                                            }
+                                        }
+                                    },
+                                    false,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        self.button(SharedString::from(format!("hr-rm-{i}")), "Hide", false, p)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                                let key = key_s.clone();
+                                this.update_config(
+                                    move |c| {
+                                        c.home_rows.retain(|r| r != &key);
+                                        if let Some(id) = key.strip_prefix("trakt_list:") {
+                                            c.home_trakt_list_ids.retain(|x| x != id);
+                                        }
+                                    },
+                                    false,
+                                    cx,
+                                );
+                            })),
+                    ),
             );
         }
+
+        let mut add = div().flex().flex_wrap().gap_2();
+        let mut any_add = false;
+        for (key, label) in builtins {
+            if cfg.home_row_visible(key) {
+                continue;
+            }
+            any_add = true;
+            let key = key.to_string();
+            add = add.child(
+                self.pill(SharedString::from(format!("home-add-{key}")), label.to_string(), false, p).on_click(
+                    cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        let key = key.clone();
+                        this.update_config(
+                            move |c| {
+                                if !c.home_rows.iter().any(|r| r == &key) {
+                                    c.home_rows.push(key);
+                                }
+                            },
+                            false,
+                            cx,
+                        );
+                    }),
+                ),
+            );
+        }
+
+        let mut pins = div().flex().flex_wrap().gap_2();
+        let mut any_pin = false;
+        for list in &self.disc.lists.cache.lists {
+            let id = rmh_app::MediaService::user_list_id(list);
+            let row_key = format!("trakt_list:{id}");
+            if cfg.home_row_visible(&row_key) {
+                continue;
+            }
+            any_pin = true;
+            let name = list.name.clone();
+            pins = pins.child(
+                self.pill(SharedString::from(format!("home-pin-{id}")), format!("+ {}", name), false, p).on_click(
+                    cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        let id = id.clone();
+                        let row_key = row_key.clone();
+                        this.update_config(
+                            move |c| {
+                                if !c.home_trakt_list_ids.iter().any(|x| x == &id) {
+                                    c.home_trakt_list_ids.push(id);
+                                }
+                                if !c.home_rows.iter().any(|r| r == &row_key) {
+                                    c.home_rows.push(row_key);
+                                }
+                            },
+                            false,
+                            cx,
+                        );
+                    }),
+                ),
+            );
+        }
+
         self.card(p)
             .child(self.section_title("Home rows", p))
-            .child(div().text_sm().text_color(rgb(p.muted)).child("Choose which rows appear on Home."))
-            .child(body)
+            .child(div().text_sm().text_color(rgb(p.muted)).child("Order and visibility for Home. ↑↓ reorder · Hide removes a row."))
+            .child(ordered)
+            .when(any_add, |c| {
+                c.child(div().mt_2().text_xs().text_color(rgb(p.faint)).child("Add a hidden row"))
+                    .child(add)
+            })
+            .when(any_pin, |c| {
+                c.child(div().mt_2().text_xs().text_color(rgb(p.faint)).child("Pin a Trakt list (sync Lists first)"))
+                    .child(pins)
+            })
+            .when(self.trakt.logged_in && self.disc.lists.cache.lists.is_empty(), |c| {
+                c.child(div().mt_2().text_xs().text_color(rgb(p.muted)).child("No cached Trakt lists yet · open Lists and sync"))
+            })
     }
 
     fn playback_extras_card(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let cfg = self.svc.config();
         self.card(p)
             .child(self.section_title("Playback extras", p))
+            .child(
+                self.toggle_row(
+                    "tg-hide-anime",
+                    "Hide anime",
+                    "Drop Japanese animation (TMDB Animation + language ja) from Home, Discover, search, lists and calendar",
+                    cfg.hide_anime,
+                    p,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                    this.update_config(|c| c.hide_anime = !c.hide_anime, false, cx);
+                    this.load_trending(cx);
+                    this.load_watchlist(cx);
+                })),
+            )
             .child(
                 self.toggle_row(
                     "tg-presearch",
@@ -680,7 +927,7 @@ impl MediaHubView {
             .child(div().h(px(4.0)))
             .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("AniList"))
             .child(div().text_xs().text_color(rgb(if anilist.logged_in { p.good } else { p.muted })).child(anilist_state))
-            .child(self.field("AniList client id", "Anime progress (Japanese animation is detected automatically)", &i.anilist_id, p))
+            .child(self.field("AniList client id", "Optional legacy sync only; Aurivon is not an anime app", &i.anilist_id, p))
             .when(!anilist.logged_in, |d| {
                 d.child(
                     div()
@@ -699,8 +946,14 @@ impl MediaHubView {
                 }))))
             })
             .child(
-                self.toggle_row("tg-anilist", "Sync anime to AniList", "Finished episodes update your progress; watchlist adds go to Planning", cfg.anilist_sync, p)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.update_config(|c| c.anilist_sync = !c.anilist_sync, false, cx))),
+                self.toggle_row(
+                    "tg-anilist",
+                    "Sync to AniList when a match is Japanese animation",
+                    "Optional; prefer Hide anime in Library if you want those titles out of discovery",
+                    cfg.anilist_sync,
+                    p,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.update_config(|c| c.anilist_sync = !c.anilist_sync, false, cx))),
             )
             .child(div().flex().child(
                 self.button("save-services", "Save services", true, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.save_service_settings(cx))),

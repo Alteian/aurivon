@@ -54,10 +54,13 @@ impl MediaHubView {
                     if let Some(r) = t.rating.filter(|r| *r > 0.0) {
                         parts.push(format!("★ {r:.1}"));
                     }
-                    let badge = if self.disc.local_ids.contains(&(t.kind, t.tmdb_id)) {
-                        Some(("In library".to_string(), p.good))
-                    } else if self.disc.watch_ids.contains(&(t.kind, t.tmdb_id)) {
+                    let avail = self.title_availability(t.kind, t.tmdb_id);
+                    let badge = if avail.local {
+                        Some(("On device".to_string(), p.good))
+                    } else if avail.on_watchlist {
                         Some(("✓ Watchlist".to_string(), p.accent))
+                    } else if avail.in_collection {
+                        Some(("Collection".to_string(), 0x4CC9F0))
                     } else {
                         None
                     };

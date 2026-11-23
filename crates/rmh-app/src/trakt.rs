@@ -264,6 +264,26 @@ impl MediaService {
         })
     }
 
+    /// TMDB ids in the user's Trakt collection (movies + shows), for availability badges.
+    pub fn trakt_collection_ids(&self) -> impl Future<Output = ServiceResult<std::collections::HashSet<(rmh_metadata::Kind, i32)>>> + 'static {
+        let client = self.trakt_client();
+        self.run(async move {
+            let c = client?;
+            if !c.is_logged_in().await {
+                return Ok(Default::default());
+            }
+            let mut out = std::collections::HashSet::new();
+            for (movie, kind) in [(true, rmh_metadata::Kind::Movie), (false, rmh_metadata::Kind::Tv)] {
+                for e in c.collection(movie).await.unwrap_or_default() {
+                    if let Some(id) = e.tmdb_id() {
+                        out.insert((kind, id as i32));
+                    }
+                }
+            }
+            Ok(out)
+        })
+    }
+
     pub fn trakt_clear_playback(&self, playback_id: i64) -> impl Future<Output = ServiceResult<()>> + 'static {
         let client = self.trakt_client();
         self.run(async move {
@@ -334,6 +354,34 @@ impl MediaService {
             let repo = MediaRepository::new(db.pool());
             let watched = c.watched().await.map_err(|e| format!("{e:#}"))?;
             let mut report = SyncReport::default();
+            // Partial progress from other devices: prefer Trakt when further along
+            if let Ok(playback) = c.playback().await {
+                for pb in &playback {
+                    let Some(tid) = pb.tmdb_id() else { continue };
+                    let pct = pb.progress.unwrap_or(0.0).clamp(0.0, 100.0);
+                    if pct <= 0.0 {
+                        continue;
+                    }
+                    for e in &entries {
+                        let Some(l) = e.link.as_ref() else { continue };
+                        if l.tmdb_id != Some(tid) {
+                            continue;
+                        }
+                        if e.item.watched {
+                            continue;
+                        }
+                        let runtime_s = e.item.runtime_minutes.unwrap_or(0).max(0) as f64 * 60.0;
+                        if runtime_s <= 0.0 {
+                            continue;
+                        }
+                        let pos = ((pct / 100.0) * runtime_s) as i64;
+                        if pos > e.item.watch_progress + 30 {
+                            let _ = repo.update_watch_progress(e.item.id, pos).await;
+                            report.pulled += 1;
+                        }
+                    }
+                }
+            }
             let mut push: Vec<(uuid::Uuid, Item)> = vec![];
             for e in &entries {
                 let Some(item) = e.trakt_item() else { continue };

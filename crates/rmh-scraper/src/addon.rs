@@ -139,8 +139,14 @@ impl ScraperAddon {
         Ok(())
     }
 
-    /// Search for streams using all scrapers
+    /// Search for streams using all scrapers (warnings discarded; prefer [`Self::search_report`]).
     pub async fn search(&self, query: &SearchQuery) -> ScraperResult<Vec<ScrapedResult>> {
+        let (hits, _) = self.search_report(query).await?;
+        Ok(hits)
+    }
+
+    /// Search scrapers and return soft-fail warnings (Torrentio down, etc.).
+    pub async fn search_report(&self, query: &SearchQuery) -> ScraperResult<(Vec<ScrapedResult>, Vec<String>)> {
         self.init().await?;
 
         // Check cache first
@@ -154,12 +160,12 @@ impl ScraperAddon {
         if let Some(mut cached) = self.cache.get_results(&cache_key).await {
             debug!("Returning cached results for {}", cache_key);
             self.apply_known_rd(&mut cached).await;
-            return Ok(cached);
+            return Ok((cached, vec![]));
         }
 
         // Search all scrapers
         let scrapers = self.scrapers.read().await;
-        let mut results = scrapers.search_all(query).await;
+        let (mut results, warnings) = scrapers.search_all(query).await;
 
         // Real-Debrid cache status we already know (see `probe_rd`)
         self.apply_known_rd(&mut results).await;
@@ -177,7 +183,7 @@ impl ScraperAddon {
         // Cache results
         self.cache.set_results(&cache_key, results.clone()).await;
 
-        Ok(results)
+        Ok((results, warnings))
     }
 
     /// Mark results whose Real-Debrid cache status was probed before

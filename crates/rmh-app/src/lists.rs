@@ -189,6 +189,47 @@ impl MediaService {
         })
     }
 
+    /// Stable id used in config (`trakt_list:<id>`) and cache keys.
+    pub fn user_list_id(list: &UserList) -> String {
+        list.ids
+            .slug
+            .clone()
+            .or_else(|| list.ids.trakt.map(|t| t.to_string()))
+            .unwrap_or_else(|| list.name.clone())
+    }
+
+    /// Sync cards from the local Trakt lists cache (no network). Used for Home row pins.
+    pub fn cached_list_cards(&self, list_id: &str) -> Vec<TitleCard> {
+        let cache = self.lists_cache();
+        let Some(entries) = cache.items.get(list_id) else {
+            return Vec::new();
+        };
+        entries
+            .iter()
+            .filter_map(|e| {
+                let tmdb = e.tmdb_id()? as i32;
+                let kind = if e.movie.is_some() { Kind::Movie } else { Kind::Tv };
+                let meta = e.movie.as_ref().or(e.show.as_ref());
+                Some(TitleCard {
+                    title: Title {
+                        kind,
+                        tmdb_id: tmdb,
+                        name: meta.and_then(|m| m.title.clone()).unwrap_or_default(),
+                        year: meta.and_then(|m| m.year).map(|y| y as u16),
+                        overview: None,
+                        poster_path: None,
+                        backdrop_path: None,
+                        rating: None,
+                        genre_ids: Vec::new(),
+                        original_language: None,
+                        votes: None,
+                    },
+                    poster: None,
+                })
+            })
+            .collect()
+    }
+
     /// Cards for the Lists hub given scope / filters.
     pub fn list_hub_cards(
         &self,
@@ -201,6 +242,7 @@ impl MediaService {
         let watch = self.watchlist();
         let http = self.inner.http.clone();
         let images = self.inner.image_dir.clone();
+        let hide_anime = self.config().hide_anime;
         let q = query.trim().to_lowercase();
         self.run(async move {
             let mut titles: Vec<(Title, Option<i32>, Option<String>)> = Vec::new();
@@ -278,7 +320,7 @@ impl MediaService {
             }
 
             let only: Vec<Title> = titles.into_iter().map(|(t, _, _)| t).collect();
-            Ok(with_posters(only, &http, &images).await)
+            Ok(with_posters(only, &http, &images, hide_anime).await)
         })
     }
 }

@@ -152,6 +152,18 @@ impl MediaHubView {
                 pills(self, "nav-style", &[("expanded", "Sidebar"), ("rail", "Icon rail"), ("top", "Top bar")], &cfg.nav_style, |c, v| c.nav_style = v.into(), cx),
                 p,
             ))
+            .child(
+                self.toggle_row(
+                    "tg-couch",
+                    "Couch mode",
+                    "Larger cards for TV distance; on Library use ←→↑↓ to move focus and Enter to open",
+                    cfg.couch_mode,
+                    p,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                    this.set_appearance(|c| c.couch_mode = !c.couch_mode, cx);
+                })),
+            )
             .into_any_element()
     }
 }

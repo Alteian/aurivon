@@ -95,7 +95,8 @@ impl MediaService {
         let titles: Vec<Title> = self.watchlist().into_iter().map(|w| w.title).collect();
         let http = self.inner.http.clone();
         let images = self.inner.image_dir.clone();
-        self.run(async move { Ok(with_posters(titles, &http, &images).await) })
+        let hide_anime = self.config().hide_anime;
+        self.run(async move { Ok(with_posters(titles, &http, &images, hide_anime).await) })
     }
 
     /// Merge local watchlist with Trakt according to the configured policy

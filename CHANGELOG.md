@@ -5,6 +5,28 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+### Added
+- Details **Sources** hub: on-disk file path plus stream results for the same title
+- Library match lock: Fix match / Lock match; locked links skip rematch (`media_links.match_locked`)
+- Home rows: reorder (↑↓), hide/add, pin Trakt custom lists as Home shelves
+- Scan progress in the busy banner; Settings flags disconnected library folders
+- Player subtitles: timing offset (±0.5s / z·x), forced-only, dual (secondary-sid); delay remembered across plays
+- Player pipeline diagnostics: Settings hwdec picker; Speed panel shows live Decode + Video (HDR)
+- **Hide anime**: optional filter (Japanese animation) for Home, Discover, search, lists and calendar; no anime-specific product features
+- Smart collections on Home: Unwatched / Recently added / 4K·UHD (pin via Settings → Home rows)
+- **Couch mode** (Settings → Appearance): larger cards; Library grid ←→↑↓ focus and Enter to open
+
+### Changed
+- Library means **on this device** (scanned folders); Lists/Watchlist is the streaming shelf: clearer copy, Matched/Unmatched filter, shared availability badges (on device / watchlist / collection), Continue labels Local vs Trakt
+- Continue watching: local progress first, then Trakt-only titles; sync prefers farther Trakt playback position
+
+### Docs
+- README Platforms: desktop only (Linux/Windows); Android APK explicitly out of scope
+- [`docs/PRODUCT_RESEARCH.md`](docs/PRODUCT_RESEARCH.md): research map + P0 marked shipped
+
+### Fixed
+- Stream search: real empty state when Torrentio/addons return nothing; surface soft-fail warnings; busy banner while searching; Retry / Enable Torrentio from empty state; error toast scrolls long messages; remote Torrentio install notes that built-in was turned off
+
 ## [0.10.1] - 2026-11-23
 
 ### Fixed

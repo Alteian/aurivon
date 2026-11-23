@@ -12,7 +12,9 @@ pub mod catalog;
 pub use browse::{
     Airing, CastMember, Credit, DiscoverQuery, Release, Extras, Genre, ListKind, Person, PersonCard, Provider, ResultPage, SearchResults, Sort, Video,
 };
-pub use catalog::{cache_image, cached_image_path, parse_release, Details, Episode, Kind, ParsedName, SeasonSummary, Title};
+pub use catalog::{
+    cache_image, cached_image_path, looks_like_anime, parse_release, Details, Episode, Kind, ParsedName, SeasonSummary, Title,
+};
 
 pub(crate) const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3";
 const TMDB_IMAGE_BASE: &str = "https://image.tmdb.org/t/p";

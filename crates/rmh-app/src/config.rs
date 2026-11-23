@@ -44,6 +44,18 @@ pub struct AppConfig {
     pub audio_lang: Option<String>,
     #[serde(default)]
     pub sub_lang: Option<String>,
+    /// Remembered subtitle timing offset in seconds (applied on play)
+    #[serde(default)]
+    pub sub_delay: f64,
+    /// Prefer forced-only subtitle events (`sub-forced-only`)
+    #[serde(default)]
+    pub sub_forced_only: bool,
+    /// Keep a secondary subtitle track when dual subs are enabled
+    #[serde(default)]
+    pub dual_subtitles: bool,
+    /// Hardware decoding for mpv (`auto`, `no`, `vaapi`, `nvdec`, `d3d11va`, …)
+    #[serde(default = "default_hwdec")]
+    pub mpv_hwdec: String,
     /// Match local files against TMDB after scanning (posters, details)
     #[serde(default = "yes")]
     pub auto_match: bool,
@@ -125,12 +137,24 @@ pub struct AppConfig {
     /// Hide watched titles in the Library grid
     #[serde(default)]
     pub library_hide_watched: bool,
+    /// Hide Japanese animation (TMDB Animation + original language ja) from discovery, search, lists and Home
+    #[serde(default)]
+    pub hide_anime: bool,
+    /// Couch / 10-foot mode: larger cards, stronger focus chrome, arrow-key grid on Library
+    #[serde(default)]
+    pub couch_mode: bool,
     /// Library type filter: "all" | "movie" | "tv" | "other"
     #[serde(default = "default_library_type")]
     pub library_type_filter: String,
-    /// Home rows that are visible (missing → shown). Keys: continue, up_next, watchlist, trakt_playback, trending, library
+    /// Library match filter: "all" | "matched" | "unmatched" (TMDB link)
+    #[serde(default = "default_library_match")]
+    pub library_match_filter: String,
+    /// Home rows in display order. Keys: continue, up_next, watchlist, trakt_playback, trending, library, and `trakt_list:<id>`
     #[serde(default = "default_home_rows")]
     pub home_rows: Vec<String>,
+    /// Trakt custom list ids pinned as Home rows (order follows `home_rows` keys `trakt_list:<id>`)
+    #[serde(default)]
+    pub home_trakt_list_ids: Vec<String>,
     /// Set once the streaming home became the default (v0.7.0); older configs
     /// are moved to it a single time, later choices stick
     #[serde(default)]
@@ -227,6 +251,9 @@ fn default_subs_cache_mb() -> u32 {
 fn default_library_type() -> String {
     "all".into()
 }
+fn default_library_match() -> String {
+    "all".into()
+}
 fn default_theme() -> String {
     "aurum".into()
 }
@@ -246,8 +273,21 @@ fn default_home_rows() -> Vec<String> {
         "watchlist".into(),
         "trakt_playback".into(),
         "trending".into(),
+        "smart:unwatched".into(),
         "library".into(),
     ]
+}
+
+/// Built-in smart collection row keys (`smart:<id>`) for Home.
+pub fn smart_collection_builtins() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("smart:unwatched", "Unwatched on device"),
+        ("smart:recent", "Recently added"),
+        ("smart:uhd", "4K / UHD on device"),
+    ]
+}
+fn default_hwdec() -> String {
+    "auto".into()
 }
 
 fn default_image_cache_mb() -> u32 {
@@ -370,6 +410,10 @@ impl Default for AppConfig {
             window_fullscreen: true,
             audio_lang: None,
             sub_lang: None,
+            sub_delay: 0.0,
+            sub_forced_only: false,
+            dual_subtitles: false,
+            mpv_hwdec: default_hwdec(),
             auto_match: true,
             trakt_client_id: std::env::var("TRAKT_CLIENT_ID").ok(),
             trakt_scrobble: true,
@@ -396,8 +440,12 @@ impl Default for AppConfig {
             subs_cache_mb: default_subs_cache_mb(),
             low_power: false,
             library_hide_watched: false,
+            hide_anime: false,
+            couch_mode: false,
             library_type_filter: default_library_type(),
+            library_match_filter: default_library_match(),
             home_rows: default_home_rows(),
+            home_trakt_list_ids: vec![],
             home_stream_default: true,
             theme: default_theme(),
             accent_color: None,
@@ -456,6 +504,9 @@ impl AppConfig {
         }
         if config.home_rows.is_empty() {
             config.home_rows = default_home_rows();
+        }
+        if config.mpv_hwdec.trim().is_empty() {
+            config.mpv_hwdec = default_hwdec();
         }
         if !config.home_stream_default {
             config.home_layout = HomeLayout::Stream;

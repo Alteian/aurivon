@@ -219,6 +219,8 @@ pub struct Disc {
     pub watch_cards: Vec<TitleCard>,
     pub watch_ids: HashSet<(TitleKind, i32)>,
     pub local_ids: HashSet<(TitleKind, i32)>,
+    /// Trakt collection (digital “owned”) — not on-disk library
+    pub collection_ids: HashSet<(TitleKind, i32)>,
     pub subs: Vec<SubtitleHit>,
     pub subs_loading: bool,
     pub subs_msg: Option<String>,
@@ -320,6 +322,7 @@ impl Disc {
             watch_cards: vec![],
             watch_ids: svc.watchlist().iter().map(|w| (w.title.kind, w.title.tmdb_id)).collect(),
             local_ids: HashSet::new(),
+            collection_ids: HashSet::new(),
             subs: vec![],
             subs_loading: false,
             subs_msg: None,
@@ -1205,18 +1208,40 @@ impl MediaHubView {
         cx.notify();
     }
 
-    /// When a file has no subtitle track in a preferred language, fetch one
+    /// When a file has no subtitle track in a preferred language, fetch one.
+    /// Also applies forced-only / dual-sub defaults once tracks are known.
     pub(crate) fn maybe_auto_subtitles(&mut self, cx: &mut Context<Self>) {
         let cfg = self.svc.config();
-        if !cfg.subtitles_auto || !self.svc.has_opensubtitles() {
+        let Some(path) = self.snap.path.clone() else { return };
+        if self.snap.tracks.is_empty() || self.now_entry.is_none() {
             return;
         }
-        let Some(path) = self.snap.path.clone() else { return };
-        if self.disc.subs_auto_for.as_deref() == Some(&path) || self.snap.tracks.is_empty() || self.now_entry.is_none() {
+        if self.disc.subs_auto_for.as_deref() == Some(&path) {
             return;
         }
         self.disc.subs_auto_for = Some(path);
         self.disc.subs.clear();
+
+        if cfg.sub_forced_only {
+            if let Some(id) = self.snap.tracks.iter().find(|t| t.kind == rmh_app::TrackKind::Sub && t.forced).map(|t| t.id) {
+                let _ = self.player.set_track(rmh_app::TrackKind::Sub, Some(id));
+                for t in self.snap.tracks.iter_mut().filter(|t| t.kind == rmh_app::TrackKind::Sub) {
+                    t.selected = t.id == id;
+                }
+            }
+            let _ = self.player.set_sub_forced_only(true);
+        }
+        if cfg.dual_subtitles {
+            let primary = self.snap.tracks.iter().find(|t| t.kind == rmh_app::TrackKind::Sub && t.selected).map(|t| t.id);
+            if let Some(sec) = self.pick_secondary_sub(primary) {
+                let _ = self.player.set_secondary_sub(Some(sec));
+                self.snap.secondary_sid = Some(sec);
+            }
+        }
+
+        if !cfg.subtitles_auto || !self.svc.has_opensubtitles() {
+            return;
+        }
         let langs = cfg.subtitle_languages();
         let has_pref = self.snap.tracks.iter().filter(|t| t.kind == rmh_app::TrackKind::Sub).any(|t| {
             t.lang.as_deref().map(rmh_app::lang_code).is_some_and(|l| langs.first() == Some(&l))

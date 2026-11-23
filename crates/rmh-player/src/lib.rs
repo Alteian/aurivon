@@ -91,6 +91,14 @@ pub struct PlaybackSnapshot {
     pub path: Option<String>,
     /// Last error reported by mpv or the actor (e.g. file failed to load)
     pub last_error: Option<String>,
+    /// Subtitle timing offset in seconds (`sub-delay`; positive = later)
+    pub sub_delay: f64,
+    /// Secondary subtitle track id (`secondary-sid`), if any
+    pub secondary_sid: Option<i64>,
+    /// Active hardware decoder (`hwdec-current`), e.g. `vaapi` / `no`
+    pub hwdec_current: Option<String>,
+    /// Short video pipeline summary from `video-params` (size, format, HDR)
+    pub video_info: Option<String>,
 }
 
 /// A chapter marker
@@ -129,6 +137,8 @@ pub struct Track {
     pub codec: Option<String>,
     pub selected: bool,
     pub external: bool,
+    /// Forced / hearing-impaired style flag from the container
+    pub forced: bool,
 }
 
 impl Track {
@@ -142,6 +152,9 @@ impl Track {
         };
         if let Some(c) = &self.codec {
             out.push_str(&format!(" ({c})"));
+        }
+        if self.forced {
+            out.push_str(" [forced]");
         }
         if self.external {
             out.push_str(" [ext]");
@@ -210,11 +223,56 @@ fn parse_tracks(v: Option<&Value>) -> Vec<Track> {
                         codec: s("codec"),
                         selected: t.get("selected").and_then(|v| v.as_bool()).unwrap_or(false),
                         external: t.get("external").and_then(|v| v.as_bool()).unwrap_or(false),
+                        forced: t.get("forced").and_then(|v| v.as_bool()).unwrap_or(false),
                     })
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn parse_video_info(data: Option<&Value>) -> Option<String> {
+    let o = data?.as_object()?;
+    let w = o.get("w").and_then(|v| v.as_i64());
+    let h = o.get("h").and_then(|v| v.as_i64());
+    let pix = o.get("pixelformat").and_then(|v| v.as_str());
+    let gamma = o.get("gamma").and_then(|v| v.as_str());
+    let prim = o.get("primaries").and_then(|v| v.as_str());
+    let mut parts = Vec::new();
+    if let (Some(w), Some(h)) = (w, h) {
+        parts.push(format!("{w}×{h}"));
+    }
+    if let Some(p) = pix {
+        parts.push(p.to_string());
+    }
+    let hdr = match gamma {
+        Some("pq") | Some("hlg") => true,
+        _ => prim.is_some_and(|p| p.contains("2020") || p.contains("bt.2020")),
+    };
+    if hdr {
+        let tag = match gamma {
+            Some("pq") => "HDR10/PQ",
+            Some("hlg") => "HLG",
+            _ => "HDR",
+        };
+        parts.push(tag.into());
+    } else if let Some(g) = gamma {
+        parts.push(g.to_string());
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    }
+}
+
+fn parse_sid(data: Option<&Value>) -> Option<i64> {
+    match data? {
+        Value::Bool(false) => None,
+        Value::String(s) if s == "no" || s.is_empty() => None,
+        Value::Number(n) => n.as_i64(),
+        other => other.as_i64(),
+    }
 }
 
 /// Messages sent to the background actor
@@ -376,6 +434,22 @@ impl Player {
     pub fn set_track(&self, kind: TrackKind, id: Option<i64>) -> Result<()> {
         let value = id.map(|i| json!(i)).unwrap_or(json!("no"));
         self.command(vec![json!("set_property"), json!(kind.property()), value])
+    }
+
+    /// Secondary subtitle track (`secondary-sid`), or off with `None`
+    pub fn set_secondary_sub(&self, id: Option<i64>) -> Result<()> {
+        let value = id.map(|i| json!(i)).unwrap_or(json!("no"));
+        self.command(vec![json!("set_property"), json!("secondary-sid"), value])
+    }
+
+    /// Subtitle timing offset in seconds (positive = show later)
+    pub fn set_sub_delay(&self, seconds: f64) -> Result<()> {
+        self.command(vec![json!("set_property"), json!("sub-delay"), json!(seconds)])
+    }
+
+    /// Only show forced subtitle events (`sub-forced-only`)
+    pub fn set_sub_forced_only(&self, on: bool) -> Result<()> {
+        self.command(vec![json!("set_property"), json!("sub-forced-only"), json!(if on { "yes" } else { "no" })])
     }
 
     /// Load an external subtitle file
@@ -574,8 +648,24 @@ impl MpvSession {
         let mut session = Self { child, lines: BufReader::new(r).lines(), writer: w, ipc_path };
 
         for (id, prop) in [
-            "time-pos", "duration", "pause", "volume", "mute", "eof-reached", "idle-active", "media-title",
-            "chapter-list", "chapter", "track-list", "fullscreen", "speed", "path",
+            "time-pos",
+            "duration",
+            "pause",
+            "volume",
+            "mute",
+            "eof-reached",
+            "idle-active",
+            "media-title",
+            "chapter-list",
+            "chapter",
+            "track-list",
+            "fullscreen",
+            "speed",
+            "path",
+            "sub-delay",
+            "secondary-sid",
+            "hwdec-current",
+            "video-params",
         ]
         .iter()
         .enumerate()
@@ -672,8 +762,10 @@ async fn run_player_actor(
                     }
                     PlayerMessage::SetConfig(new_config) => {
                         let restart = session.is_some()
-                            && (new_config.wid != config.wid || new_config.mpv_path != config.mpv_path
-                                || new_config.headless != config.headless);
+                            && (new_config.wid != config.wid
+                                || new_config.mpv_path != config.mpv_path
+                                || new_config.headless != config.headless
+                                || new_config.hwdec != config.hwdec);
                         config = new_config;
                         if restart {
                             if let Some(s) = session.take() { s.shutdown().await; }
@@ -753,6 +845,12 @@ fn handle_ipc_event(val: &Value, state: &Arc<RwLock<PlaybackSnapshot>>) {
                 "fullscreen" => s.fullscreen = data.and_then(|v| v.as_bool()).unwrap_or(false),
                 "speed" => s.speed = data.and_then(|v| v.as_f64()).unwrap_or(1.0),
                 "path" => s.path = data.and_then(|v| v.as_str()).map(|t| t.to_string()),
+                "sub-delay" => s.sub_delay = data.and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "secondary-sid" => s.secondary_sid = parse_sid(data),
+                "hwdec-current" => {
+                    s.hwdec_current = data.and_then(|v| v.as_str()).map(|t| t.to_string()).filter(|t| !t.is_empty() && t != "no")
+                }
+                "video-params" => s.video_info = parse_video_info(data),
                 _ => {}
             }
         }

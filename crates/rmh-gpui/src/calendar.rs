@@ -231,8 +231,9 @@ impl MediaHubView {
     fn release_row(&self, it: &CalendarItem, id: String, highlighted: bool, p: Palette, cx: &mut Context<Self>) -> AnyElement {
         let item = it.clone();
         let watch = it.title.as_ref().map(|t| TitleCard { title: t.clone(), poster: it.poster.clone() });
-        let on_list = it.tmdb_id.is_some_and(|tid| self.disc.watch_ids.contains(&(it.title_kind, tid)));
-        let local = it.tmdb_id.is_some_and(|tid| self.disc.local_ids.contains(&(it.title_kind, tid)));
+        let avail = it.tmdb_id.map(|tid| self.title_availability(it.title_kind, tid));
+        let on_list = avail.is_some_and(|a| a.on_watchlist);
+        let local = avail.is_some_and(|a| a.local);
         div()
             .id(SharedString::from(id.clone()))
             .flex()
@@ -263,7 +264,7 @@ impl MediaHubView {
                             .child(chip(it.kind.label(), 0xFFFFFF10, kind_color(it.kind, p)))
                             .when_some(it.time.clone(), |d, t| d.child(chip(t, 0xFFFFFF10, p.text)))
                             .when(it.mine, |d| d.child(chip("Mine", (p.accent << 8) | 0x33, p.accent)))
-                            .when(local, |d| d.child(chip("In library", 0x5FD39A22, p.good))),
+                            .when(local, |d| d.child(chip("On device", 0x5FD39A22, p.good))),
                     ),
             )
             .when_some(watch, |d, card| {

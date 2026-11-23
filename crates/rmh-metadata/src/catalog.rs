@@ -98,6 +98,16 @@ impl Title {
     pub fn poster_url(&self, size: PosterSize) -> Option<String> {
         self.poster_path.as_deref().map(|p| TmdbClient::poster_url(p, size))
     }
+
+    /// Japanese animation only (TMDB Animation + original language `ja`). Western cartoons are not anime.
+    pub fn looks_like_anime(&self) -> bool {
+        looks_like_anime(self.original_language.as_deref(), &self.genre_ids)
+    }
+}
+
+/// Shared heuristic for excluding anime from discovery (not an anime catalog feature).
+pub fn looks_like_anime(original_language: Option<&str>, genre_ids: &[i32]) -> bool {
+    original_language == Some("ja") && genre_ids.contains(&16)
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -131,8 +131,17 @@ impl MediaService {
             let (mut matched, mut unmatched) = (0, 0);
             let mut details_cache: HashMap<(Kind, i32), Details> = HashMap::new();
             for item in items {
-                if is_audio(&item) || (!force && known.contains_key(&item.id.to_string())) {
+                let id_key = item.id.to_string();
+                if is_audio(&item) {
                     continue;
+                }
+                if let Some(existing) = known.get(&id_key) {
+                    if existing.match_locked != 0 {
+                        continue;
+                    }
+                    if !force {
+                        continue;
+                    }
                 }
                 let parsed = parse_release(&item.file_name);
                 let hit = match tmdb.match_file(&parsed).await {
@@ -189,6 +198,7 @@ impl MediaService {
                     poster_path: poster.map(|p| p.to_string_lossy().to_string()),
                     genres: details.as_ref().map(|d| d.genres.iter().take(3).cloned().collect::<Vec<_>>().join(", ")),
                     trakt_synced_at: None,
+                    match_locked: 0,
                 };
                 repo.upsert_media_link(&link).await.map_err(|e| format!("{e:#}"))?;
                 let overview = episode.as_ref().and_then(|e| e.overview.clone()).or(title.overview.clone());
@@ -216,12 +226,99 @@ impl MediaService {
         })
     }
 
+    /// Lock or unlock a file’s TMDB match (locked rows skip force Re-match).
+    pub fn set_match_locked(&self, media_id: uuid::Uuid, locked: bool) -> impl Future<Output = ServiceResult<()>> + 'static {
+        let db = self.db();
+        self.run(async move {
+            let db = db.await?;
+            MediaRepository::new(db.pool())
+                .set_match_locked(media_id, locked)
+                .await
+                .map_err(|e| format!("{e:#}"))
+        })
+    }
+
+    /// Manually link a library file to a TMDB title and lock the match.
+    pub fn link_media_to_title(
+        &self,
+        media_id: uuid::Uuid,
+        kind: Kind,
+        tmdb_id: i32,
+    ) -> impl Future<Output = ServiceResult<()>> + 'static {
+        let db = self.db();
+        let tmdb = self.tmdb();
+        let http = self.inner.http.clone();
+        let images = self.inner.image_dir.clone();
+        self.run(async move {
+            let tmdb = tmdb?;
+            let db = db.await?;
+            let repo = MediaRepository::new(db.pool());
+            let item = repo
+                .get_all_media()
+                .await
+                .map_err(|e| format!("{e:#}"))?
+                .into_iter()
+                .find(|m| m.id == media_id)
+                .ok_or_else(|| "Media item not found".to_string())?;
+            let details = tmdb.details(kind, tmdb_id).await.map_err(|e| format!("{e:#}"))?;
+            let title = details.title.clone();
+            let parsed = parse_release(&item.file_name);
+            let poster = match title.poster_url(PosterSize::W342) {
+                Some(url) => crate::images::fetch_image(&http, &url, &images).await.ok(),
+                None => None,
+            };
+            let episode = if kind == Kind::Tv {
+                match (parsed.season, parsed.episode) {
+                    (Some(s), Some(e)) => tmdb.episode(tmdb_id, s, e).await.ok(),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let link = MediaLink {
+                media_id: media_id.to_string(),
+                kind: kind.as_str().into(),
+                tmdb_id: Some(tmdb_id as i64),
+                imdb_id: details.imdb_id.clone(),
+                show_title: Some(title.name.clone()),
+                season: parsed.season.map(i64::from),
+                episode: parsed.episode.map(i64::from),
+                episode_title: episode.as_ref().map(|e| e.name.clone()),
+                poster_path: poster.map(|p| p.to_string_lossy().to_string()),
+                genres: Some(details.genres.iter().take(3).cloned().collect::<Vec<_>>().join(", ")),
+                trakt_synced_at: None,
+                match_locked: 1,
+            };
+            repo.upsert_media_link(&link).await.map_err(|e| format!("{e:#}"))?;
+            let overview = episode.as_ref().and_then(|e| e.overview.clone()).or(title.overview.clone());
+            let release = episode.as_ref().and_then(|e| e.air_date.clone()).or(title.year.map(|y| format!("{y}-01-01")));
+            let runtime = episode.as_ref().and_then(|e| e.runtime).or(details.runtime_minutes);
+            let poster_url = title.poster_url(PosterSize::W342);
+            let backdrop = title.backdrop_path.as_deref().map(|b| TmdbClient::backdrop_url(b, rmh_metadata::BackdropSize::W1280));
+            let _ = repo
+                .update_media_metadata(
+                    media_id,
+                    &title.name,
+                    poster_url.as_deref(),
+                    backdrop.as_deref(),
+                    overview.as_deref(),
+                    release.as_deref(),
+                    title.rating,
+                    runtime,
+                    Some(tmdb_id),
+                )
+                .await;
+            Ok(())
+        })
+    }
+
     /// Movies and shows for a query; an IMDb id ("tt…") is looked up directly
     pub fn search_titles(&self, query: impl Into<String>) -> impl Future<Output = ServiceResult<Vec<TitleCard>>> + 'static {
         let query: String = query.into();
         let tmdb = self.tmdb();
         let http = self.inner.http.clone();
         let images = self.inner.image_dir.clone();
+        let hide_anime = self.config().hide_anime;
         self.run(async move {
             let tmdb = tmdb?;
             let q = query.trim();
@@ -230,7 +327,7 @@ impl MediaService {
             } else {
                 tmdb.search_titles(q).await.map_err(|e| format!("TMDB search failed: {e:#}"))?
             };
-            Ok(with_posters(titles, &http, &images).await)
+            Ok(with_posters(titles, &http, &images, hide_anime).await)
         })
     }
 
@@ -238,9 +335,10 @@ impl MediaService {
         let tmdb = self.tmdb();
         let http = self.inner.http.clone();
         let images = self.inner.image_dir.clone();
+        let hide_anime = self.config().hide_anime;
         self.run(async move {
             let titles = tmdb?.trending(None).await.map_err(|e| format!("{e:#}"))?;
-            Ok(with_posters(titles, &http, &images).await)
+            Ok(with_posters(titles, &http, &images, hide_anime).await)
         })
     }
 
@@ -268,6 +366,7 @@ impl MediaService {
         let tmdb = self.tmdb();
         let http = self.inner.http.clone();
         let images = self.inner.image_dir.clone();
+        let hide_anime = self.config().hide_anime;
         self.run(async move {
             let tmdb = tmdb?;
             let mut set = JoinSet::new();
@@ -282,7 +381,7 @@ impl MediaService {
                 }
             }
             titles.sort_by_key(|(i, _)| *i);
-            Ok(with_posters(titles.into_iter().map(|(_, t)| t).collect(), &http, &images).await)
+            Ok(with_posters(titles.into_iter().map(|(_, t)| t).collect(), &http, &images, hide_anime).await)
         })
     }
 }
@@ -290,9 +389,11 @@ impl MediaService {
 /// Cards for `titles`, with posters only where they are already on disk.
 /// Nothing is downloaded here: the UI fetches posters lazily as cards scroll
 /// into view (see [`MediaService::image`]).
-pub(crate) async fn with_posters(titles: Vec<Title>, _http: &reqwest::Client, dir: &Path) -> Vec<TitleCard> {
+/// When `hide_anime` is set, drops Japanese animation (Animation + `ja`).
+pub(crate) async fn with_posters(titles: Vec<Title>, _http: &reqwest::Client, dir: &Path, hide_anime: bool) -> Vec<TitleCard> {
     titles
         .into_iter()
+        .filter(|t| !hide_anime || !t.looks_like_anime())
         .map(|title| {
             let poster = crate::images::poster_url(&title)
                 .map(|u| rmh_metadata::cached_image_path(&u, dir))
