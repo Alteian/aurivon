@@ -5,6 +5,9 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+### Fixed
+- Windows release packaging: pick `mpv-*-x86_64-*-full.zip` (exclude PDB-only assets)
+
 ## [0.10.0] - 2026-11-23
 
 ### Added

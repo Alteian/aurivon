@@ -71,13 +71,19 @@ Portable / updater zip:
 Write-Host "Fetching bundled mpv (mpv-player/mpv latest full x86_64)..."
 $mpvApi = Invoke-RestMethod -Headers @{ "User-Agent" = "Aurivon-packager" } `
     -Uri "https://api.github.com/repos/mpv-player/mpv/releases/latest"
+# Names look like mpv-v0.42.0-x86_64-w64-mingw32-full.zip (version sits between mpv- and arch).
 $mpvAsset = $mpvApi.assets | Where-Object {
-    $_.name -match 'mpv-x86_64.*full.*\.zip$' -or $_.name -eq 'mpv-x86_64-w64-mingw32-full.zip'
+    $_.name -match '^mpv-.*-x86_64-w64-mingw32-full\.zip$'
 } | Select-Object -First 1
 if (-not $mpvAsset) {
-    # Fallback: any x86_64 windows zip that isn't libmpv/dev
+    # Fallback: MSVC player build (not PDB symbols, not libmpv)
     $mpvAsset = $mpvApi.assets | Where-Object {
-        $_.name -match 'x86_64' -and $_.name -match '\.zip$' -and $_.name -notmatch 'libmpv|debug|dev'
+        $_.name -match '^mpv-.*-x86_64-pc-windows-msvc\.zip$'
+    } | Select-Object -First 1
+}
+if (-not $mpvAsset) {
+    $mpvAsset = $mpvApi.assets | Where-Object {
+        $_.name -match 'x86_64' -and $_.name -match '\.zip$' -and $_.name -notmatch 'libmpv|debug|dev|pdb|\.asc$'
     } | Select-Object -First 1
 }
 if (-not $mpvAsset) { throw "Could not find an mpv Windows x86_64 zip on $($mpvApi.tag_name)" }
