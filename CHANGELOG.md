@@ -5,6 +5,8 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-23
+
 ### Added
 - Full Trakt depth: lists hub (All / Watchlist / named lists, filter/sort, create/rename/delete), mark watched/unwatch (title, season, episode), ratings, favorites, collection, hide calendar/recs, show progress + Related, calendar Premieres filter
 - `rmh-trakt` APIs for lists, history remove, playback delete, progress, ratings, favorites, collection, hide, related
