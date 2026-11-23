@@ -5,6 +5,8 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-23
+
 ### Added
 - Details **Sources** hub: on-disk file path plus stream results for the same title
 - Library match lock: Fix match / Lock match; locked links skip rematch (`media_links.match_locked`)
