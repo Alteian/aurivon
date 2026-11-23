@@ -146,7 +146,7 @@ impl Page {
         match self {
             Page::Home => "Home",
             Page::Library => "Library",
-            Page::Watchlist => "Watchlist",
+            Page::Watchlist => "Lists",
             Page::Discover => "Browse",
             Page::Calendar => "Calendar",
             Page::Player => "Now Playing",
@@ -176,7 +176,7 @@ impl Page {
         match self {
             Page::Home => "What to watch tonight",
             Page::Library => "Everything in your local folders",
-            Page::Watchlist => "Titles you want to watch · synced with Trakt",
+            Page::Watchlist => "Watchlist and named Trakt lists",
             Page::Discover => "Trending, genres, filters and streaming services",
             Page::Calendar => "New episodes, premieres, cinema and digital releases",
             Page::Player => "",
@@ -211,6 +211,9 @@ pub struct DetailsState {
     pub loading: bool,
     pub season: Option<u32>,
     pub episodes: Vec<Episode>,
+    /// Trakt watched progress for series (next episode)
+    pub trakt_progress: Option<rmh_app::ShowProgress>,
+    pub related: Vec<TitleCard>,
 }
 
 /// Where a stream list came from (for the Trakt item / title)
@@ -247,6 +250,7 @@ pub struct MediaHubView {
     pub(crate) rd_input: Entity<InputState>,
     pub(crate) mpv_input: Entity<InputState>,
     pub(crate) trakt_id_input: Entity<InputState>,
+    pub(crate) trakt_code_input: Entity<InputState>,
     pub(crate) alang_input: Entity<InputState>,
     pub(crate) slang_input: Entity<InputState>,
 
@@ -345,6 +349,7 @@ impl MediaHubView {
         let rd_input = input(cx, window, "Real-Debrid API key (optional)", opt(&config.real_debrid_api_key), true);
         let mpv_input = input(cx, window, "mpv", mpv_path.clone(), false);
         let trakt_id_input = input(cx, window, "Trakt client id", opt(&config.trakt_client_id), true);
+        let trakt_code_input = input(cx, window, "Paste OAuth code if browser handoff fails", String::new(), false);
         let alang_input = input(cx, window, "e.g. cze,eng", opt(&config.audio_lang), false);
         let slang_input = input(cx, window, "e.g. eng,cze", opt(&config.sub_lang), false);
 
@@ -412,6 +417,7 @@ impl MediaHubView {
             rd_input,
             mpv_input,
             trakt_id_input,
+            trakt_code_input,
             alang_input,
             slang_input,
             results: Vec::new(),
@@ -633,6 +639,13 @@ impl MediaHubView {
         match page {
             Page::Discover => self.ensure_browse(cx),
             Page::Calendar => self.load_calendar(false, cx),
+            Page::Watchlist => {
+                if self.trakt.logged_in && self.disc.lists.cache.lists.is_empty() {
+                    self.refresh_lists_from_trakt(cx);
+                } else {
+                    self.reload_lists_hub(cx);
+                }
+            }
             Page::Settings => self.refresh_cache_usage(),
             _ => {}
         }
@@ -1537,6 +1550,8 @@ impl MediaHubView {
                 loading: true,
                 season: None,
                 episodes: vec![],
+                trakt_progress: None,
+                related: vec![],
             },
             window,
             cx,
@@ -1563,6 +1578,8 @@ impl MediaHubView {
                 loading: true,
                 season,
                 episodes: vec![],
+                trakt_progress: None,
+                related: vec![],
             },
             window,
             cx,
@@ -1579,6 +1596,61 @@ impl MediaHubView {
         self.details = Some(state);
         self.navigate(Page::Details, window, cx);
         let (Some(kind), Some(id)) = (kind, id) else { return };
+        if self.trakt.logged_in {
+            if kind == TitleKind::Tv {
+                let prog = self.svc.trakt_show_progress(id);
+                cx.spawn(async move |this, cx| {
+                    let res = prog.await;
+                    this.update(cx, |this, cx| {
+                        if let (Ok(p), Some(d)) = (res, this.details.as_mut()) {
+                            d.trakt_progress = Some(p);
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            let related = self.svc.trakt_related(kind, id);
+            cx.spawn(async move |this, cx| {
+                let res = related.await;
+                this.update(cx, |this, cx| {
+                    if let Ok(entries) = res {
+                        let cards: Vec<TitleCard> = entries
+                            .into_iter()
+                            .filter_map(|e| {
+                                let tmdb = e.tmdb_id()? as i32;
+                                let k = if e.movie.is_some() { TitleKind::Movie } else { TitleKind::Tv };
+                                let name = e.movie.as_ref().or(e.show.as_ref()).and_then(|m| m.title.clone())?;
+                                let year = e.movie.as_ref().or(e.show.as_ref()).and_then(|m| m.year).map(|y| y as u16);
+                                Some(TitleCard {
+                                    title: rmh_app::Title {
+                                        kind: k,
+                                        tmdb_id: tmdb,
+                                        name,
+                                        year,
+                                        overview: None,
+                                        poster_path: None,
+                                        backdrop_path: None,
+                                        rating: None,
+                                        genre_ids: vec![],
+                                        original_language: None,
+                                        votes: None,
+                                    },
+                                    poster: None,
+                                })
+                            })
+                            .collect();
+                        if let Some(d) = this.details.as_mut() {
+                            d.related = cards;
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
         if !self.svc.has_tmdb() {
             if let Some(d) = self.details.as_mut() {
                 d.loading = false;
@@ -1901,6 +1973,60 @@ impl MediaHubView {
             })
             .ok();
             let res = svc.trakt_finish_login().await;
+            this.update(cx, |this, cx| {
+                this.trakt_waiting = false;
+                match res {
+                    Ok(user) => {
+                        this.status = Some(format!("Connected to Trakt{}", user.map(|u| format!(" as {u}")).unwrap_or_default()));
+                        this.refresh_trakt(cx);
+                        this.trakt_sync(cx);
+                    }
+                    Err(e) if e.to_lowercase().contains("cancelled") => {
+                        // Paste-code stops the listener with this error; ignore if already logged in / not waiting.
+                        if this.trakt.logged_in {
+                            this.status = Some("Connected to Trakt".into());
+                        } else if this.error.is_none() {
+                            this.status = Some("Trakt login cancelled".into());
+                        }
+                    }
+                    Err(e) => this.error = Some(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn trakt_cancel_connect(&mut self, cx: &mut Context<Self>) {
+        if !self.trakt_waiting {
+            return;
+        }
+        let fut = self.svc.trakt_cancel_login();
+        cx.spawn(async move |this, cx| {
+            let _ = fut.await;
+            this.update(cx, |this, cx| {
+                this.trakt_waiting = false;
+                this.status = Some("Trakt login cancelled".into());
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn trakt_paste_code(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let code = self.trakt_code_input.read(cx).value().trim().to_string();
+        if code.is_empty() {
+            self.error = Some("Paste the OAuth code from the browser page".into());
+            cx.notify();
+            return;
+        }
+        self.trakt_code_input.update(cx, |s, cx| s.set_value("", window, cx));
+        self.trakt_waiting = false;
+        let fut = self.svc.trakt_complete_login(code);
+        cx.spawn(async move |this, cx| {
+            let res = fut.await;
             this.update(cx, |this, cx| {
                 this.trakt_waiting = false;
                 match res {

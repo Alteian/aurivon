@@ -669,7 +669,7 @@ impl MediaHubView {
             .absolute()
             .top_5()
             .right_5()
-            .max_w(px(460.0))
+            .max_w(px(520.0))
             .flex()
             .items_start()
             .gap_3()
@@ -685,7 +685,14 @@ impl MediaHubView {
                 cx.notify();
             }))
             .child(div().text_color(rgb(p.danger)).child("●"))
-            .child(div().flex_1().child(err))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .overflow_hidden()
+                    .child(err),
+            )
             .child(div().text_color(rgb(p.muted)).child("✕"))
     }
 }

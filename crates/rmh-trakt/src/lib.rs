@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 use tracing::{info, warn};
 
 const API: &str = "https://api.trakt.tv";
@@ -104,7 +104,7 @@ fn pkce_verifier() -> Result<String> {
     // 64 chars from the unreserved set (43–128 required)
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
     let mut raw = [0u8; 64];
-    getrandom::getrandom(&mut raw).context("RNG failed for PKCE verifier")?;
+    getrandom::getrandom(&mut raw).map_err(|e| anyhow!("RNG failed for PKCE verifier: {e}"))?;
     Ok(raw.iter().map(|b| CHARS[(*b as usize) % CHARS.len()] as char).collect())
 }
 
@@ -115,7 +115,7 @@ fn pkce_challenge_s256(verifier: &str) -> String {
 
 fn random_state() -> Result<String> {
     let mut raw = [0u8; 16];
-    getrandom::getrandom(&mut raw).context("RNG failed for OAuth state")?;
+    getrandom::getrandom(&mut raw).map_err(|e| anyhow!("RNG failed for OAuth state: {e}"))?;
     Ok(URL_SAFE_NO_PAD.encode(raw))
 }
 
@@ -173,7 +173,7 @@ pub struct EpisodeRef {
     pub ids: Ids,
 }
 
-/// A watchlist / history / playback entry
+/// A watchlist / history / playback / list entry
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Entry {
     #[serde(rename = "type")]
@@ -183,9 +183,52 @@ pub struct Entry {
     pub episode: Option<EpisodeRef>,
     /// Playback progress percent (sync/playback)
     pub progress: Option<f64>,
+    /// Playback id for DELETE /sync/playback/{id}
+    pub id: Option<i64>,
+    pub rank: Option<i32>,
     pub listed_at: Option<String>,
     pub watched_at: Option<String>,
     pub paused_at: Option<String>,
+}
+
+/// Custom user list metadata (`GET /users/me/lists`)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UserList {
+    pub name: String,
+    pub description: Option<String>,
+    pub privacy: Option<String>,
+    pub display_numbers: Option<bool>,
+    pub allow_comments: Option<bool>,
+    pub sort_by: Option<String>,
+    pub sort_how: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub item_count: Option<i32>,
+    pub comment_count: Option<i32>,
+    pub likes: Option<i32>,
+    #[serde(default)]
+    pub ids: Ids,
+}
+
+/// Next episode + counts from show watched progress
+#[derive(Debug, Clone, Default)]
+pub struct ShowProgress {
+    pub aired: u32,
+    pub completed: u32,
+    pub next_season: Option<u32>,
+    pub next_number: Option<u32>,
+    pub next_title: Option<String>,
+}
+
+/// Last sync timestamps (`GET /sync/last_activities`)
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LastActivities {
+    pub all: Option<String>,
+    pub watched: Option<String>,
+    pub watchlist: Option<String>,
+    pub lists: Option<String>,
+    pub recommendations: Option<String>,
+    pub favorites: Option<String>,
 }
 
 impl Entry {
@@ -282,6 +325,8 @@ pub struct TraktClient {
     token_path: PathBuf,
     token: Arc<Mutex<Option<TraktToken>>>,
     pending: Arc<Mutex<Option<PendingPkce>>>,
+    /// Abort [`Self::wait_for_pkce_login`] and drop the loopback listener.
+    cancel_wait: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
 
 impl TraktClient {
@@ -298,6 +343,7 @@ impl TraktClient {
             token_path,
             token: Arc::new(Mutex::new(token)),
             pending: Arc::new(Mutex::new(None)),
+            cancel_wait: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -321,6 +367,7 @@ impl TraktClient {
     /// Start Authorization Code + PKCE. Binds the loopback callback first, then return
     /// [`PkceLogin::auth_url`] to open in a browser.
     pub async fn start_pkce_login(&self) -> Result<PkceLogin> {
+        self.cancel_pkce_login().await;
         let listener = TcpListener::bind(LOOPBACK)
             .await
             .with_context(|| format!("Could not bind {LOOPBACK} (is another Aurivon login open?)"))?;
@@ -339,6 +386,19 @@ impl TraktClient {
         Ok(PkceLogin { auth_url, redirect_uri: REDIRECT_URI.into() })
     }
 
+    /// Stop a pending login and release `127.0.0.1:18787`.
+    pub async fn cancel_pkce_login(&self) {
+        self.stop_pkce_listener().await;
+        *self.pending.lock().await = None;
+    }
+
+    /// Drop the loopback waiter but keep the PKCE verifier (for paste-code completion).
+    pub async fn stop_pkce_listener(&self) {
+        if let Some(tx) = self.cancel_wait.lock().await.take() {
+            let _ = tx.send(());
+        }
+    }
+
     /// Wait for the HTTPS callback page to forward `?code=` to `http://127.0.0.1:18787/callback`.
     pub async fn wait_for_pkce_login(&self) -> Result<Option<String>> {
         let listener = {
@@ -348,14 +408,31 @@ impl TraktClient {
                 .and_then(|p| p.listener.take())
                 .ok_or_else(|| anyhow!("No Trakt login in progress — click Connect again"))?
         };
-        let (code, state) = tokio::time::timeout(Duration::from_secs(15 * 60), accept_oauth_code(&listener))
-            .await
-            .context("Trakt login timed out (15 minutes)")??;
+        let (tx, rx) = oneshot::channel();
+        *self.cancel_wait.lock().await = Some(tx);
+        let accepted = tokio::select! {
+            biased;
+            _ = rx => {
+                drop(listener);
+                *self.cancel_wait.lock().await = None;
+                // Keep `pending` so paste-code can still finish with the same verifier.
+                bail!("Trakt login cancelled");
+            }
+            result = tokio::time::timeout(Duration::from_secs(15 * 60), accept_oauth_code(&listener)) => {
+                *self.cancel_wait.lock().await = None;
+                result.context("Trakt login timed out (15 minutes)")?
+            }
+        };
+        let (code, state) = accepted?;
         self.finish_with_code_and_state(&code, Some(&state)).await
     }
 
     /// Paste the `code` from the callback page if the automatic forward failed.
     pub async fn complete_pkce_login(&self, code: &str) -> Result<Option<String>> {
+        // Free the port so we don't leave a waiter racing the same one-time code.
+        self.stop_pkce_listener().await;
+        // Brief yield so `wait_for_pkce_login`'s cancel arm can drop the listener.
+        tokio::task::yield_now().await;
         self.finish_with_code_and_state(code.trim(), None).await
     }
 
@@ -388,7 +465,7 @@ impl TraktClient {
             .context("Trakt token exchange failed")?;
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
-            bail!("Trakt rejected the authorization code: {body}");
+            bail!("{}", format_oauth_token_error(&body));
         }
         let mut token: TraktToken = resp.json().await?;
         token.username = self.fetch_username_with(&token.access_token).await.ok();
@@ -400,7 +477,7 @@ impl TraktClient {
     }
 
     pub async fn logout(&self) -> Result<()> {
-        *self.pending.lock().await = None;
+        self.cancel_pkce_login().await;
         if let Some(t) = self.token.lock().await.take() {
             let _ = self
                 .request(reqwest::Method::POST, "/oauth/revoke")
@@ -469,6 +546,23 @@ impl TraktClient {
         Ok(resp.json().await.unwrap_or(Value::Null))
     }
 
+    async fn delete(&self, path: &str) -> Result<()> {
+        let resp = self.authed(reqwest::Method::DELETE, path).await?.send().await?;
+        let status = resp.status();
+        if status.as_u16() == 404 {
+            return Ok(());
+        }
+        if !status.is_success() {
+            bail!("Trakt {path} failed: {status}");
+        }
+        Ok(())
+    }
+
+    /// POST with an arbitrary JSON body (season/show history helpers).
+    pub async fn post_raw(&self, path: &str, body: Value) -> Result<Value> {
+        self.post(path, body).await
+    }
+
     async fn fetch_username_with(&self, access: &str) -> Result<String> {
         #[derive(Deserialize)]
         struct Me {
@@ -526,30 +620,30 @@ impl TraktClient {
         let shows: Vec<RecShow> = self.get(&format!("/recommendations/shows?limit={lim}")).await.unwrap_or_default();
         let mut out = Vec::with_capacity(movies.len() + shows.len());
         for m in movies {
-            out.push(Entry {
-                kind: "movie".into(),
-                movie: Some(m.movie),
-                show: None,
-                episode: None,
-                progress: None,
-                listed_at: None,
-                watched_at: None,
-                paused_at: None,
-            });
+            out.push(entry_movie(m.movie));
         }
         for s in shows {
-            out.push(Entry {
-                kind: "show".into(),
-                movie: None,
-                show: Some(s.show),
-                episode: None,
-                progress: None,
-                listed_at: None,
-                watched_at: None,
-                paused_at: None,
-            });
+            out.push(entry_show(s.show));
         }
         Ok(out)
+    }
+
+    /// Hide a recommendation so it stops appearing.
+    pub async fn hide_recommendation(&self, movie: bool, trakt_or_slug: &str) -> Result<()> {
+        let kind = if movie { "movies" } else { "shows" };
+        self.delete(&format!("/recommendations/{kind}/{trakt_or_slug}")).await
+    }
+
+    /// Related titles for a movie or show (TMDB id or slug/trakt id string).
+    pub async fn related(&self, movie: bool, id: &str, limit: u32) -> Result<Vec<Entry>> {
+        let kind = if movie { "movies" } else { "shows" };
+        let lim = limit.clamp(1, 100);
+        let path = format!("/{kind}/{id}/related?limit={lim}");
+        let refs: Vec<MediaRef> = self.get(&path).await?;
+        Ok(refs
+            .into_iter()
+            .map(|m| if movie { entry_movie(m) } else { entry_show(m) })
+            .collect())
     }
 
     pub async fn watched(&self) -> Result<Watched> {
@@ -599,6 +693,14 @@ impl TraktClient {
         self.post("/sync/history", sync_body(items)).await.map(|_| ())
     }
 
+    /// Remove watched history (unwatch)
+    pub async fn remove_from_history(&self, items: &[Item]) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        self.post("/sync/history/remove", sync_body(items)).await.map(|_| ())
+    }
+
     pub async fn add_to_watchlist(&self, item: &Item) -> Result<()> {
         self.post("/sync/watchlist", sync_body(std::slice::from_ref(item))).await.map(|_| ())
     }
@@ -626,6 +728,214 @@ impl TraktClient {
         self.post("/sync/watchlist", json!({ "shows": shows })).await.map(|_| ())
     }
 
+    /// Clear a playback progress entry (`DELETE /sync/playback/{id}`).
+    pub async fn remove_playback(&self, playback_id: i64) -> Result<()> {
+        self.delete(&format!("/sync/playback/{playback_id}")).await
+    }
+
+    pub async fn last_activities(&self) -> Result<LastActivities> {
+        self.get("/sync/last_activities").await
+    }
+
+    /// Watched progress for a show (next episode + counts). `id` is slug, trakt, or `tmdb:123`.
+    pub async fn show_watched_progress(&self, id: &str) -> Result<ShowProgress> {
+        #[derive(Deserialize)]
+        struct NextEp {
+            season: u32,
+            number: u32,
+            title: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct Prog {
+            aired: Option<u32>,
+            completed: Option<u32>,
+            next_episode: Option<NextEp>,
+        }
+        let p: Prog = self.get(&format!("/shows/{id}/progress/watched")).await?;
+        Ok(ShowProgress {
+            aired: p.aired.unwrap_or(0),
+            completed: p.completed.unwrap_or(0),
+            next_season: p.next_episode.as_ref().map(|e| e.season),
+            next_number: p.next_episode.as_ref().map(|e| e.number),
+            next_title: p.next_episode.and_then(|e| e.title),
+        })
+    }
+
+    // --------------------------------------------------------------- lists
+
+    pub async fn user_lists(&self) -> Result<Vec<UserList>> {
+        self.get("/users/me/lists").await
+    }
+
+    pub async fn list_items(&self, list_id: &str) -> Result<Vec<Entry>> {
+        self.get(&format!("/users/me/lists/{list_id}/items")).await
+    }
+
+    pub async fn add_to_list(&self, list_id: &str, movies: &[i64], shows: &[i64]) -> Result<()> {
+        if movies.is_empty() && shows.is_empty() {
+            return Ok(());
+        }
+        let body = json!({
+            "movies": movies.iter().map(|id| json!({ "ids": { "tmdb": id } })).collect::<Vec<_>>(),
+            "shows": shows.iter().map(|id| json!({ "ids": { "tmdb": id } })).collect::<Vec<_>>(),
+        });
+        self.post(&format!("/users/me/lists/{list_id}/items"), body).await.map(|_| ())
+    }
+
+    pub async fn remove_from_list(&self, list_id: &str, movies: &[i64], shows: &[i64]) -> Result<()> {
+        if movies.is_empty() && shows.is_empty() {
+            return Ok(());
+        }
+        let body = json!({
+            "movies": movies.iter().map(|id| json!({ "ids": { "tmdb": id } })).collect::<Vec<_>>(),
+            "shows": shows.iter().map(|id| json!({ "ids": { "tmdb": id } })).collect::<Vec<_>>(),
+        });
+        self.post(&format!("/users/me/lists/{list_id}/items/remove"), body)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn create_list(&self, name: &str, description: Option<&str>) -> Result<UserList> {
+        let body = json!({
+            "name": name,
+            "description": description.unwrap_or(""),
+            "privacy": "private",
+            "display_numbers": false,
+            "allow_comments": false,
+        });
+        let resp = self
+            .authed(reqwest::Method::POST, "/users/me/lists")
+            .await?
+            .json(&body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            bail!("Trakt create list failed: {}", resp.status());
+        }
+        Ok(resp.json().await?)
+    }
+
+    pub async fn update_list(&self, list_id: &str, name: &str, description: Option<&str>) -> Result<UserList> {
+        let body = json!({
+            "name": name,
+            "description": description.unwrap_or(""),
+        });
+        let resp = self
+            .authed(reqwest::Method::PUT, &format!("/users/me/lists/{list_id}"))
+            .await?
+            .json(&body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            bail!("Trakt update list failed: {}", resp.status());
+        }
+        Ok(resp.json().await?)
+    }
+
+    pub async fn delete_list(&self, list_id: &str) -> Result<()> {
+        self.delete(&format!("/users/me/lists/{list_id}")).await
+    }
+
+    // ------------------------------------------------------------- ratings
+
+    /// Rate 1–10. `movie` selects movies vs shows body.
+    pub async fn add_rating(&self, movie: bool, tmdb: i64, rating: u8) -> Result<()> {
+        let rating = rating.clamp(1, 10);
+        let body = if movie {
+            json!({ "movies": [{ "rating": rating, "ids": { "tmdb": tmdb } }] })
+        } else {
+            json!({ "shows": [{ "rating": rating, "ids": { "tmdb": tmdb } }] })
+        };
+        self.post("/sync/ratings", body).await.map(|_| ())
+    }
+
+    pub async fn remove_rating(&self, movie: bool, tmdb: i64) -> Result<()> {
+        let body = if movie {
+            json!({ "movies": [{ "ids": { "tmdb": tmdb } }] })
+        } else {
+            json!({ "shows": [{ "ids": { "tmdb": tmdb } }] })
+        };
+        self.post("/sync/ratings/remove", body).await.map(|_| ())
+    }
+
+    pub async fn ratings(&self) -> Result<Vec<Entry>> {
+        self.get("/sync/ratings").await
+    }
+
+    // ----------------------------------------------------------- favorites
+
+    pub async fn favorites(&self) -> Result<Vec<Entry>> {
+        // Newer Trakt: /sync/favorites; fall back to empty on 404
+        match self.get::<Vec<Entry>>("/sync/favorites").await {
+            Ok(v) => Ok(v),
+            Err(_) => Ok(Vec::new()),
+        }
+    }
+
+    pub async fn add_favorite(&self, movie: bool, tmdb: i64) -> Result<()> {
+        let body = if movie {
+            json!({ "movies": [{ "ids": { "tmdb": tmdb } }] })
+        } else {
+            json!({ "shows": [{ "ids": { "tmdb": tmdb } }] })
+        };
+        self.post("/sync/favorites", body).await.map(|_| ())
+    }
+
+    pub async fn remove_favorite(&self, movie: bool, tmdb: i64) -> Result<()> {
+        let body = if movie {
+            json!({ "movies": [{ "ids": { "tmdb": tmdb } }] })
+        } else {
+            json!({ "shows": [{ "ids": { "tmdb": tmdb } }] })
+        };
+        self.post("/sync/favorites/remove", body).await.map(|_| ())
+    }
+
+    // ----------------------------------------------------------- collection
+
+    pub async fn collection(&self, movies: bool) -> Result<Vec<Entry>> {
+        let kind = if movies { "movies" } else { "shows" };
+        self.get(&format!("/sync/collection/{kind}")).await
+    }
+
+    pub async fn add_to_collection(&self, movie: bool, tmdb: i64) -> Result<()> {
+        let body = if movie {
+            json!({ "movies": [{ "ids": { "tmdb": tmdb } }] })
+        } else {
+            json!({ "shows": [{ "ids": { "tmdb": tmdb } }] })
+        };
+        self.post("/sync/collection", body).await.map(|_| ())
+    }
+
+    pub async fn remove_from_collection(&self, movie: bool, tmdb: i64) -> Result<()> {
+        let body = if movie {
+            json!({ "movies": [{ "ids": { "tmdb": tmdb } }] })
+        } else {
+            json!({ "shows": [{ "ids": { "tmdb": tmdb } }] })
+        };
+        self.post("/sync/collection/remove", body).await.map(|_| ())
+    }
+
+    // --------------------------------------------------------------- hide
+
+    /// Hide from calendar (`section` = `calendar`) or recommendations (`recommendations`).
+    pub async fn hide_from(&self, section: &str, movie: bool, tmdb: i64) -> Result<()> {
+        let body = if movie {
+            json!({ "movies": [{ "ids": { "tmdb": tmdb } }] })
+        } else {
+            json!({ "shows": [{ "ids": { "tmdb": tmdb } }] })
+        };
+        self.post(&format!("/users/hidden/{section}"), body).await.map(|_| ())
+    }
+
+    pub async fn unhide_from(&self, section: &str, movie: bool, tmdb: i64) -> Result<()> {
+        let body = if movie {
+            json!({ "movies": [{ "ids": { "tmdb": tmdb } }] })
+        } else {
+            json!({ "shows": [{ "ids": { "tmdb": tmdb } }] })
+        };
+        self.post(&format!("/users/hidden/{section}/remove"), body).await.map(|_| ())
+    }
+
     /// Release calendar. `my` = shows/movies the user follows (needs login),
     /// otherwise everything on Trakt. Dates are UTC; `start` is YYYY-MM-DD.
     pub async fn calendar(&self, my: bool, what: CalendarKind, start: &str, days: u32) -> Result<Vec<CalendarEntry>> {
@@ -646,6 +956,46 @@ impl TraktClient {
 
     pub async fn add_show_to_watchlist(&self, show_tmdb: i64) -> Result<()> {
         self.post("/sync/watchlist", json!({ "shows": [{ "ids": { "tmdb": show_tmdb } }] })).await.map(|_| ())
+    }
+}
+
+/// Turn Trakt's OAuth token error JSON into a short, actionable message.
+fn format_oauth_token_error(body: &str) -> String {
+    let (error, description) = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .map(|v| {
+            (
+                v.get("error").and_then(|e| e.as_str()).unwrap_or("").to_string(),
+                v.get("error_description").and_then(|e| e.as_str()).unwrap_or("").to_string(),
+            )
+        })
+        .unwrap_or_default();
+    match error.as_str() {
+        "invalid_grant" => {
+            let detail = if description.is_empty() {
+                String::new()
+            } else {
+                format!(" ({description})")
+            };
+            format!(
+                "Trakt rejected the login code{detail}. Codes are single-use and expire quickly. \
+                 In Aurivon: Cancel if still waiting, clear any Client id override, click Connect once, \
+                 approve in the browser, and return here — only paste the code if the app is still Waiting."
+            )
+        }
+        "invalid_client" | "unauthorized_client" => {
+            format!(
+                "Trakt rejected this app’s client id{}. Clear the Client id override on Addons (use the built-in id) and Connect again.",
+                if description.is_empty() { String::new() } else { format!(" ({description})") }
+            )
+        }
+        _ if !error.is_empty() => {
+            format!(
+                "Trakt login failed ({error}{}). Cancel, Connect once, and try again.",
+                if description.is_empty() { String::new() } else { format!(": {description}") }
+            )
+        }
+        _ => format!("Trakt rejected the authorization code: {body}"),
     }
 }
 
@@ -731,6 +1081,36 @@ fn urlencoding_decode(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+fn entry_movie(movie: MediaRef) -> Entry {
+    Entry {
+        kind: "movie".into(),
+        movie: Some(movie),
+        show: None,
+        episode: None,
+        progress: None,
+        id: None,
+        rank: None,
+        listed_at: None,
+        watched_at: None,
+        paused_at: None,
+    }
+}
+
+fn entry_show(show: MediaRef) -> Entry {
+    Entry {
+        kind: "show".into(),
+        movie: None,
+        show: Some(show),
+        episode: None,
+        progress: None,
+        id: None,
+        rank: None,
+        listed_at: None,
+        watched_at: None,
+        paused_at: None,
+    }
 }
 
 /// Body for /sync/history and /sync/watchlist

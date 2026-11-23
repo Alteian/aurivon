@@ -91,7 +91,12 @@ impl MediaHubView {
             })
             .child({
                 let mut d = div().flex().gap_1();
-                for (id, label, r) in [("cr-all", "All releases", CalRelease::All), ("cr-th", "Cinema", CalRelease::Theatrical), ("cr-dg", "Digital", CalRelease::Digital)] {
+                for (id, label, r) in [
+                    ("cr-all", "All releases", CalRelease::All),
+                    ("cr-th", "Cinema", CalRelease::Theatrical),
+                    ("cr-dg", "Digital", CalRelease::Digital),
+                    ("cr-pr", "Premieres", CalRelease::Premiere),
+                ] {
                     d = d.child(seg(self, id, label, c.release == r).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                         this.disc.calendar.release = r;
                         cx.notify();
@@ -122,7 +127,7 @@ impl MediaHubView {
         if !self.svc.has_tmdb() && !self.trakt.logged_in {
             return col
                 .child(self.card(p).child(div().text_sm().text_color(rgb(p.muted)).child(
-                    "The release calendar needs Trakt (Settings → Services → Connect) or a TMDB API key.",
+                    "The release calendar needs Trakt (Addons → Connect) or a TMDB API key.",
                 )))
                 .into_any_element();
         }

@@ -39,38 +39,23 @@
         msg.className = "err";
         msg.textContent = "No authorization code in this URL.";
         hint.hidden = false;
-        hint.textContent = "Open Trakt from Aurivon Settings → Services → Save & connect.";
+        hint.textContent = "Open Trakt from Aurivon Addons → Connect.";
         return;
       }
 
+      // Single handoff only — do not fetch + image + navigate (re-uses the one-time code).
       var q = "code=" + encodeURIComponent(code);
       if (state) q += "&state=" + encodeURIComponent(state);
       var target = "http://127.0.0.1:18787/callback?" + q;
 
-      fetch(target, { mode: "no-cors", cache: "no-store" })
-        .then(function () {
-          msg.className = "ok";
-          msg.textContent = "Connected — you can close this tab and return to Aurivon.";
-        })
-        .catch(function () {
-          // Fallback: navigate the tab itself (works even if fetch is blocked)
-          window.location.replace(target);
-          msg.className = "ok";
-          msg.textContent = "Handing off to Aurivon…";
-          hint.hidden = false;
-          hint.innerHTML = "If nothing happens, copy this code into Aurivon:<br><code>" +
-            code.replace(/</g, "&lt;") + "</code>";
-        });
+      msg.textContent = "Handing off to Aurivon…";
+      hint.hidden = false;
+      hint.innerHTML =
+        "If Aurivon does not connect, return to the app (still on Waiting), paste this code under Addons → Trakt, then click Use pasted code:<br><code>" +
+        code.replace(/</g, "&lt;") +
+        "</code><br>Do not paste after a successful connect — codes work only once.";
 
-      // Also try a silent image/beacon navigate for older browsers
-      setTimeout(function () {
-        if (!document.hidden) {
-          try {
-            var img = new Image();
-            img.src = target;
-          } catch (e) {}
-        }
-      }, 400);
+      window.location.replace(target);
     })();
   </script>
 </body>

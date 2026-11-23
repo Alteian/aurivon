@@ -5,6 +5,16 @@ MAJOR for breaking changes, MINOR for features, PATCH for fixes.
 
 ## [Unreleased]
 
+### Added
+- Full Trakt depth: lists hub (All / Watchlist / named lists, filter/sort, create/rename/delete), mark watched/unwatch (title, season, episode), ratings, favorites, collection, hide calendar/recs, show progress + Related, calendar Premieres filter
+- `rmh-trakt` APIs for lists, history remove, playback delete, progress, ratings, favorites, collection, hide, related
+- Trakt Addons card: paste OAuth code fallback; watchlist sync policy (Merge / Trakt wins / Local wins)
+
+### Fixed
+- Trakt Connect: **Cancel** stops waiting and releases `127.0.0.1:18787` if the browser login is abandoned
+- Trakt OAuth / calendar copy pointed at Addons (not Settings → Services)
+- Trakt OAuth callback no longer double-delivers the one-time code (common `invalid_grant`); clearer login errors; paste-code keeps the PKCE verifier
+
 ## [0.9.2] - 2026-11-23
 
 ### Fixed

@@ -164,6 +164,19 @@ pub enum CalRelease {
     All,
     Theatrical,
     Digital,
+    Premiere,
+}
+
+/// Lists / Watchlist hub filters
+pub struct ListsState {
+    pub scope: rmh_app::ListScope,
+    pub type_filter: rmh_app::ListTypeFilter,
+    pub sort: rmh_app::ListSort,
+    pub query: String,
+    pub cache: rmh_app::ListsCache,
+    pub cards: Vec<TitleCard>,
+    pub loading: bool,
+    pub new_name: Entity<InputState>,
 }
 
 pub struct CalendarState {
@@ -202,6 +215,7 @@ pub struct Disc {
     pub extras: Option<((TitleKind, i32), TitleExtras)>,
     pub extras_loading: bool,
     pub calendar: CalendarState,
+    pub lists: ListsState,
     pub watch_cards: Vec<TitleCard>,
     pub watch_ids: HashSet<(TitleKind, i32)>,
     pub local_ids: HashSet<(TitleKind, i32)>,
@@ -292,6 +306,16 @@ impl Disc {
                 sel_day: today,
                 sel_item: 0,
                 stale: false,
+            },
+            lists: ListsState {
+                scope: rmh_app::ListScope::Watchlist,
+                type_filter: rmh_app::ListTypeFilter::All,
+                sort: rmh_app::ListSort::Added,
+                query: String::new(),
+                cache: svc.lists_cache(),
+                cards: vec![],
+                loading: false,
+                new_name: input(cx, window, "New list name", String::new(), false),
             },
             watch_cards: vec![],
             watch_ids: svc.watchlist().iter().map(|w| (w.title.kind, w.title.tmdb_id)).collect(),
@@ -1003,6 +1027,7 @@ impl MediaHubView {
                 CalRelease::All => true,
                 CalRelease::Theatrical => i.kind == rmh_app::ReleaseKind::Theatrical || !i.kind.is_movie(),
                 CalRelease::Digital => i.kind == rmh_app::ReleaseKind::Digital || !i.kind.is_movie(),
+                CalRelease::Premiere => i.kind == rmh_app::ReleaseKind::Premiere || i.kind == rmh_app::ReleaseKind::Episode,
             })
             .cloned()
             .map(|mut i| {
@@ -1089,7 +1114,8 @@ impl MediaHubView {
                 c.release = match (c.release, shift) {
                     (CalRelease::All, _) => CalRelease::Theatrical,
                     (CalRelease::Theatrical, _) => CalRelease::Digital,
-                    (CalRelease::Digital, _) => CalRelease::All,
+                    (CalRelease::Digital, _) => CalRelease::Premiere,
+                    (CalRelease::Premiere, _) => CalRelease::All,
                 }
             }
             "enter" | "w" => {

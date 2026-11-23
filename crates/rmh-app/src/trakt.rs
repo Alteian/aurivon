@@ -66,6 +66,15 @@ impl MediaService {
         self.run(async move { client?.wait_for_pkce_login().await.map_err(|e| format!("{e:#}")) })
     }
 
+    /// Abort a waiting PKCE login and free the loopback port.
+    pub fn trakt_cancel_login(&self) -> impl Future<Output = ServiceResult<()>> + 'static {
+        let client = self.trakt_client();
+        self.run(async move {
+            client?.cancel_pkce_login().await;
+            Ok(())
+        })
+    }
+
     /// Paste the `code` from the callback page if the automatic forward failed.
     pub fn trakt_complete_login(&self, code: String) -> impl Future<Output = ServiceResult<Option<String>>> + 'static {
         let client = self.trakt_client();
@@ -106,6 +115,161 @@ impl MediaService {
                 Err(e) => warn!("Trakt history push failed: {e:#}"),
             }
         });
+    }
+
+    /// Remove from Trakt history (unwatch).
+    pub fn trakt_unwatch(&self, item: Item) {
+        let Ok(client) = self.trakt_client() else { return };
+        self.inner.rt.spawn(async move {
+            if !client.is_logged_in().await {
+                return;
+            }
+            match client.remove_from_history(&[item]).await {
+                Ok(()) => info!("Trakt history remove ok"),
+                Err(e) => warn!("Trakt history remove failed: {e:#}"),
+            }
+        });
+    }
+
+    pub fn trakt_mark_watched(
+        &self,
+        kind: rmh_metadata::Kind,
+        tmdb_id: i32,
+        season: Option<u32>,
+        episode: Option<u32>,
+        watched: bool,
+    ) -> impl Future<Output = ServiceResult<()>> + 'static {
+        let client = self.trakt_client();
+        self.run(async move {
+            let c = client?;
+            let body = match (kind, season, episode) {
+                (rmh_metadata::Kind::Movie, _, _) => {
+                    let item = Item::Movie { tmdb: tmdb_id as i64 };
+                    return if watched {
+                        c.add_to_history(&[item]).await.map_err(|e| format!("{e:#}"))
+                    } else {
+                        c.remove_from_history(&[item]).await.map_err(|e| format!("{e:#}"))
+                    };
+                }
+                (rmh_metadata::Kind::Tv, Some(s), Some(n)) => {
+                    let item = Item::Episode {
+                        show_tmdb: tmdb_id as i64,
+                        season: s,
+                        number: n,
+                    };
+                    return if watched {
+                        c.add_to_history(&[item]).await.map_err(|e| format!("{e:#}"))
+                    } else {
+                        c.remove_from_history(&[item]).await.map_err(|e| format!("{e:#}"))
+                    };
+                }
+                (rmh_metadata::Kind::Tv, Some(s), None) => serde_json::json!({
+                    "shows": [{ "ids": { "tmdb": tmdb_id }, "seasons": [{ "number": s }] }]
+                }),
+                (rmh_metadata::Kind::Tv, None, _) => serde_json::json!({
+                    "shows": [{ "ids": { "tmdb": tmdb_id } }]
+                }),
+            };
+            let path = if watched { "/sync/history" } else { "/sync/history/remove" };
+            c.post_raw(path, body).await.map(|_| ()).map_err(|e| format!("{e:#}"))
+        })
+    }
+
+    pub fn trakt_show_progress(&self, tmdb_id: i32) -> impl Future<Output = ServiceResult<rmh_trakt::ShowProgress>> + 'static {
+        let client = self.trakt_client();
+        self.run(async move {
+            let c = client?;
+            c.show_watched_progress(&format!("tmdb:{tmdb_id}"))
+                .await
+                .map_err(|e| format!("{e:#}"))
+        })
+    }
+
+    pub fn trakt_rate(&self, kind: rmh_metadata::Kind, tmdb_id: i32, rating: u8) -> impl Future<Output = ServiceResult<()>> + 'static {
+        let client = self.trakt_client();
+        self.run(async move {
+            let c = client?;
+            c.add_rating(kind == rmh_metadata::Kind::Movie, tmdb_id as i64, rating)
+                .await
+                .map_err(|e| format!("{e:#}"))
+        })
+    }
+
+    pub fn trakt_clear_rating(&self, kind: rmh_metadata::Kind, tmdb_id: i32) -> impl Future<Output = ServiceResult<()>> + 'static {
+        let client = self.trakt_client();
+        self.run(async move {
+            let c = client?;
+            c.remove_rating(kind == rmh_metadata::Kind::Movie, tmdb_id as i64)
+                .await
+                .map_err(|e| format!("{e:#}"))
+        })
+    }
+
+    pub fn trakt_set_favorite(&self, kind: rmh_metadata::Kind, tmdb_id: i32, on: bool) -> impl Future<Output = ServiceResult<()>> + 'static {
+        let client = self.trakt_client();
+        self.run(async move {
+            let c = client?;
+            let movie = kind == rmh_metadata::Kind::Movie;
+            if on {
+                c.add_favorite(movie, tmdb_id as i64).await.map_err(|e| format!("{e:#}"))
+            } else {
+                c.remove_favorite(movie, tmdb_id as i64).await.map_err(|e| format!("{e:#}"))
+            }
+        })
+    }
+
+    pub fn trakt_hide_recommendation(&self, kind: rmh_metadata::Kind, tmdb_id: i32) -> impl Future<Output = ServiceResult<()>> + 'static {
+        let client = self.trakt_client();
+        self.run(async move {
+            let c = client?;
+            c.hide_recommendation(kind == rmh_metadata::Kind::Movie, &format!("tmdb:{tmdb_id}"))
+                .await
+                .map_err(|e| format!("{e:#}"))
+        })
+    }
+
+    pub fn trakt_related(&self, kind: rmh_metadata::Kind, tmdb_id: i32) -> impl Future<Output = ServiceResult<Vec<rmh_trakt::Entry>>> + 'static {
+        let client = self.trakt_client();
+        self.run(async move {
+            let c = client?;
+            c.related(kind == rmh_metadata::Kind::Movie, &format!("tmdb:{tmdb_id}"), 12)
+                .await
+                .map_err(|e| format!("{e:#}"))
+        })
+    }
+
+    pub fn trakt_hide_calendar(&self, kind: rmh_metadata::Kind, tmdb_id: i32, hide: bool) -> impl Future<Output = ServiceResult<()>> + 'static {
+        let client = self.trakt_client();
+        self.run(async move {
+            let c = client?;
+            let movie = kind == rmh_metadata::Kind::Movie;
+            if hide {
+                c.hide_from("calendar", movie, tmdb_id as i64).await.map_err(|e| format!("{e:#}"))
+            } else {
+                c.unhide_from("calendar", movie, tmdb_id as i64).await.map_err(|e| format!("{e:#}"))
+            }
+        })
+    }
+
+    pub fn trakt_collection_toggle(&self, kind: rmh_metadata::Kind, tmdb_id: i32, add: bool) -> impl Future<Output = ServiceResult<()>> + 'static {
+        let client = self.trakt_client();
+        self.run(async move {
+            let c = client?;
+            let movie = kind == rmh_metadata::Kind::Movie;
+            if add {
+                c.add_to_collection(movie, tmdb_id as i64).await.map_err(|e| format!("{e:#}"))
+            } else {
+                c.remove_from_collection(movie, tmdb_id as i64).await.map_err(|e| format!("{e:#}"))
+            }
+        })
+    }
+
+    pub fn trakt_clear_playback(&self, playback_id: i64) -> impl Future<Output = ServiceResult<()>> + 'static {
+        let client = self.trakt_client();
+        self.run(async move {
+            let c = client?;
+            c.remove_playback(playback_id).await.map_err(|e| format!("{e:#}"))
+        })
     }
 
     pub fn trakt_lists(&self) -> impl Future<Output = ServiceResult<TraktLists>> + 'static {

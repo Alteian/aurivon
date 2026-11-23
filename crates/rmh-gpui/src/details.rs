@@ -252,6 +252,121 @@ impl MediaHubView {
                 self.button("det-wl", if listed { "✓ On watchlist" } else { "+ Watchlist" }, false, p)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.toggle_watchlist(&card, cx))),
             );
+            if self.trakt.logged_in {
+                let kind_m = k;
+                let tid = id;
+                actions = actions
+                    .child(self.button("det-seen", "Mark watched", false, p).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        let fut = this.svc.trakt_mark_watched(kind_m, tid, None, None, true);
+                        cx.spawn(async move |this, cx| {
+                            let res = fut.await;
+                            this.update(cx, |this, cx| {
+                                match res {
+                                    Ok(()) => this.status = Some("Marked watched on Trakt".into()),
+                                    Err(e) => this.error = Some(e),
+                                }
+                                cx.notify();
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    })))
+                    .child(self.button("det-unseen", "Unwatch", false, p).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        let fut = this.svc.trakt_mark_watched(kind_m, tid, None, None, false);
+                        cx.spawn(async move |this, cx| {
+                            let res = fut.await;
+                            this.update(cx, |this, cx| {
+                                match res {
+                                    Ok(()) => this.status = Some("Removed from Trakt history".into()),
+                                    Err(e) => this.error = Some(e),
+                                }
+                                cx.notify();
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    })))
+                    .child(self.button("det-fav", "Favorite", false, p).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        let fut = this.svc.trakt_set_favorite(kind_m, tid, true);
+                        cx.spawn(async move |this, cx| {
+                            let res = fut.await;
+                            this.update(cx, |this, cx| {
+                                match res {
+                                    Ok(()) => this.status = Some("Added to Trakt favorites".into()),
+                                    Err(e) => this.error = Some(e),
+                                }
+                                cx.notify();
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    })))
+                    .child(self.button("det-coll", "In collection", false, p).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        let fut = this.svc.trakt_collection_toggle(kind_m, tid, true);
+                        cx.spawn(async move |this, cx| {
+                            let res = fut.await;
+                            this.update(cx, |this, cx| {
+                                match res {
+                                    Ok(()) => this.status = Some("Added to Trakt collection".into()),
+                                    Err(e) => this.error = Some(e),
+                                }
+                                cx.notify();
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    })))
+                    .child(self.button("det-hide-rec", "Not interested", false, p).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        let fut = this.svc.trakt_hide_recommendation(kind_m, tid);
+                        cx.spawn(async move |this, cx| {
+                            let res = fut.await;
+                            this.update(cx, |this, cx| {
+                                match res {
+                                    Ok(()) => this.status = Some("Hidden from Trakt recommendations".into()),
+                                    Err(e) => this.error = Some(e),
+                                }
+                                cx.notify();
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    })))
+                    .child(self.button("det-hide-cal", "Hide on calendar", false, p).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        let fut = this.svc.trakt_hide_calendar(kind_m, tid, true);
+                        cx.spawn(async move |this, cx| {
+                            let res = fut.await;
+                            this.update(cx, |this, cx| {
+                                match res {
+                                    Ok(()) => this.status = Some("Hidden from Trakt calendar".into()),
+                                    Err(e) => this.error = Some(e),
+                                }
+                                cx.notify();
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    })));
+                // Rating chips 1–10
+                let mut rates = div().flex().gap_1().child(div().text_xs().text_color(rgb(p.muted)).child("Rate"));
+                for r in 1u8..=10 {
+                    rates = rates.child(self.pill(SharedString::from(format!("det-rate-{r}")), format!("{r}"), false, p).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        let fut = this.svc.trakt_rate(kind_m, tid, r);
+                        cx.spawn(async move |this, cx| {
+                            let res = fut.await;
+                            this.update(cx, |this, cx| {
+                                match res {
+                                    Ok(()) => this.status = Some(format!("Rated {r}/10 on Trakt")),
+                                    Err(e) => this.error = Some(e),
+                                }
+                                cx.notify();
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    })));
+                }
+                actions = actions.child(rates);
+            }
         }
         actions = actions.child(self.button("det-back", "← Back", false, p).on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
             let back = this.back_page;
@@ -291,6 +406,18 @@ impl MediaHubView {
                             })
                             .child(div().text_sm().text_color(rgb(p.muted)).child(meta))
                             .child(self.availability(kind, tmdb_id, local.is_some(), p))
+                            .when_some(d.trakt_progress.clone(), |el, prog| {
+                                let next = match (prog.next_season, prog.next_number, prog.next_title) {
+                                    (Some(s), Some(n), Some(t)) => format!("Next: S{s:02}E{n:02} · {t}"),
+                                    (Some(s), Some(n), None) => format!("Next: S{s:02}E{n:02}"),
+                                    _ => "Caught up".into(),
+                                };
+                                el.child(div().text_sm().text_color(rgb(p.accent)).child(format!(
+                                    "Trakt progress {completed}/{aired} · {next}",
+                                    completed = prog.completed,
+                                    aired = prog.aired
+                                )))
+                            })
                             .child(div().text_sm().line_clamp(5).child(
                                 title.as_ref().and_then(|t| t.overview.clone()).unwrap_or_else(|| {
                                     if d.loading { "Loading details…".into() } else { String::new() }
@@ -317,6 +444,25 @@ impl MediaHubView {
                     self.pill(SharedString::from(format!("season-{n}")), label, d.season == Some(n), p)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.select_season(n, cx))),
                 );
+            }
+            if self.trakt.logged_in {
+                if let Some(sn) = d.season {
+                    seasons = seasons.child(self.button("season-seen", "Mark season watched", false, p).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        let fut = this.svc.trakt_mark_watched(TitleKind::Tv, show, Some(sn), None, true);
+                        cx.spawn(async move |this, cx| {
+                            let res = fut.await;
+                            this.update(cx, |this, cx| {
+                                match res {
+                                    Ok(()) => this.status = Some(format!("Season {sn} marked watched on Trakt")),
+                                    Err(e) => this.error = Some(e),
+                                }
+                                cx.notify();
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    })));
+                }
             }
             let mut eps = div().flex().flex_col().gap_2();
             if d.episodes.is_empty() {
@@ -349,6 +495,33 @@ impl MediaHubView {
                             .child(div().text_xs().text_color(rgb(p.faint)).line_clamp(2).child(ep.overview.clone().unwrap_or_default())),
                     )
                     .child(div().w(px(90.0)).text_xs().text_color(rgb(p.muted)).child(ep.air_date.clone().unwrap_or_default()));
+                if self.trakt.logged_in {
+                    row = row
+                        .child(self.button(SharedString::from(format!("ep-seen-{s}-{n}")), "✓", false, p).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                            let fut = this.svc.trakt_mark_watched(TitleKind::Tv, show, Some(s), Some(n), true);
+                            cx.spawn(async move |this, cx| {
+                                let _ = fut.await;
+                                this.update(cx, |this, cx| {
+                                    this.status = Some(format!("Marked S{s:02}E{n:02} watched"));
+                                    cx.notify();
+                                })
+                                .ok();
+                            })
+                            .detach();
+                        })))
+                        .child(self.button(SharedString::from(format!("ep-unseen-{s}-{n}")), "↺", false, p).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                            let fut = this.svc.trakt_mark_watched(TitleKind::Tv, show, Some(s), Some(n), false);
+                            cx.spawn(async move |this, cx| {
+                                let _ = fut.await;
+                                this.update(cx, |this, cx| {
+                                    this.status = Some(format!("Unwatched S{s:02}E{n:02}"));
+                                    cx.notify();
+                                })
+                                .ok();
+                            })
+                            .detach();
+                        })));
+                }
                 if let Some(e) = local_ep {
                     let id = e.item.id;
                     let watched = e.item.watched;
@@ -385,6 +558,10 @@ impl MediaHubView {
             col = col.child(self.extras_sections(&x, kind, p, cx));
         } else if self.disc.extras_loading {
             col = col.child(div().text_sm().text_color(rgb(p.muted)).child("Loading cast, trailers and similar titles…"));
+        }
+        if !d.related.is_empty() {
+            let cards = d.related.iter().map(|c| self.title_card(c, "trakt-rel", 140.0, p, cx)).collect();
+            col = col.child(self.section("Related on Trakt", Some("similar titles from Trakt".into()), self.row("trakt-rel", cards), p));
         }
         col.into_any_element()
     }

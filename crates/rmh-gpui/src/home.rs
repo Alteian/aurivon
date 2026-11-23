@@ -351,28 +351,244 @@ impl MediaHubView {
             .into_any_element()
     }
 
+    pub(crate) fn reload_lists_hub(&mut self, cx: &mut Context<Self>) {
+        let scope = self.disc.lists.scope.clone();
+        let type_filter = self.disc.lists.type_filter;
+        let sort = self.disc.lists.sort;
+        let query = self.disc.lists.query.clone();
+        self.disc.lists.loading = true;
+        cx.notify();
+        let fut = self.svc.list_hub_cards(scope, type_filter, sort, query);
+        cx.spawn(async move |this, cx| {
+            let res = fut.await;
+            this.update(cx, |this, cx| {
+                this.disc.lists.loading = false;
+                match res {
+                    Ok(cards) => {
+                        this.disc.lists.cards = cards.clone();
+                        if matches!(this.disc.lists.scope, rmh_app::ListScope::Watchlist | rmh_app::ListScope::All) {
+                            this.disc.watch_cards = cards;
+                        }
+                    }
+                    Err(e) => this.error = Some(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn refresh_lists_from_trakt(&mut self, cx: &mut Context<Self>) {
+        if !self.trakt.logged_in {
+            self.reload_lists_hub(cx);
+            return;
+        }
+        let fut = self.svc.refresh_trakt_lists();
+        self.disc.lists.loading = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let res = fut.await;
+            this.update(cx, |this, cx| {
+                match res {
+                    Ok(cache) => {
+                        this.disc.lists.cache = cache;
+                        this.status = Some("Lists refreshed from Trakt".into());
+                    }
+                    Err(e) => this.error = Some(e),
+                }
+                this.reload_lists_hub(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub(crate) fn watchlist_page(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let cards = &self.disc.watch_cards;
-        let mut col = div().flex().flex_col().gap_6().child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_4()
-                .child(div().text_sm().text_color(rgb(p.muted)).child(if self.trakt.logged_in {
-                    format!("{} titles · linked to Trakt", cards.len())
-                } else {
-                    format!("{} titles · connect Trakt in Settings to sync", cards.len())
-                }))
-                .when(self.trakt.logged_in, |d| {
-                    d.child(
-                        self.button("wl-sync", "Sync with Trakt", true, p)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.sync_watchlist_only(cx))),
-                    )
-                }),
-        );
+        use rmh_app::{ListScope, ListSort, ListTypeFilter};
+
+        let lists = &self.disc.lists;
+        let cards = if lists.cards.is_empty() && !lists.loading {
+            &self.disc.watch_cards
+        } else {
+            &lists.cards
+        };
+
+        let mut chips = div().flex().flex_wrap().gap_2();
+        let mut scopes: Vec<(ListScope, String)> = vec![
+            (ListScope::All, "All".into()),
+            (ListScope::Watchlist, "Watchlist".into()),
+        ];
+        for list in &lists.cache.lists {
+            let id = list
+                .ids
+                .slug
+                .clone()
+                .or_else(|| list.ids.trakt.map(|t| t.to_string()))
+                .unwrap_or_else(|| list.name.clone());
+            let label = if let Some(n) = list.item_count {
+                format!("{} ({n})", list.name)
+            } else {
+                list.name.clone()
+            };
+            scopes.push((ListScope::Custom(id), label));
+        }
+        for (scope, label) in scopes {
+            let on = lists.scope == scope;
+            let scope_c = scope.clone();
+            chips = chips.child(
+                self.pill(SharedString::from(format!("list-scope-{label}")), SharedString::from(label), on, p)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        this.disc.lists.scope = scope_c.clone();
+                        this.reload_lists_hub(cx);
+                    })),
+            );
+        }
+
+        let type_row = div()
+            .flex()
+            .gap_1()
+            .child(self.pill("lt-all", "All types", lists.type_filter == ListTypeFilter::All, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                this.disc.lists.type_filter = ListTypeFilter::All;
+                this.reload_lists_hub(cx);
+            })))
+            .child(self.pill("lt-mov", "Movies", lists.type_filter == ListTypeFilter::Movies, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                this.disc.lists.type_filter = ListTypeFilter::Movies;
+                this.reload_lists_hub(cx);
+            })))
+            .child(self.pill("lt-tv", "Shows", lists.type_filter == ListTypeFilter::Shows, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                this.disc.lists.type_filter = ListTypeFilter::Shows;
+                this.reload_lists_hub(cx);
+            })));
+
+        let sort_row = div()
+            .flex()
+            .gap_1()
+            .child(self.pill("ls-added", "Added", lists.sort == ListSort::Added, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                this.disc.lists.sort = ListSort::Added;
+                this.reload_lists_hub(cx);
+            })))
+            .child(self.pill("ls-title", "Title", lists.sort == ListSort::Title, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                this.disc.lists.sort = ListSort::Title;
+                this.reload_lists_hub(cx);
+            })))
+            .child(self.pill("ls-year", "Year", lists.sort == ListSort::Year, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                this.disc.lists.sort = ListSort::Year;
+                this.reload_lists_hub(cx);
+            })))
+            .child(self.pill("ls-rank", "Rank", lists.sort == ListSort::Rank, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                this.disc.lists.sort = ListSort::Rank;
+                this.reload_lists_hub(cx);
+            })));
+
+        let toolbar = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap_4()
+            .child(div().text_sm().text_color(rgb(p.muted)).child(if self.trakt.logged_in {
+                format!("{} titles · Trakt lists + watchlist", cards.len())
+            } else {
+                format!("{} titles · connect Trakt on Addons to sync lists", cards.len())
+            }))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .when(self.trakt.logged_in, |d| {
+                        d.child(
+                            self.button("lists-refresh", "Sync lists", true, p)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.refresh_lists_from_trakt(cx))),
+                        )
+                        .child(
+                            self.button("wl-sync", "Sync watchlist", false, p)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.sync_watchlist_only(cx))),
+                        )
+                    }),
+            );
+
+        let mut create_row = div().flex().gap_2().items_center();
+        if self.trakt.logged_in {
+            create_row = create_row
+                .child(div().w(px(220.0)).child(Input::new(&lists.new_name).w_full()))
+                .child(self.button("list-create", "Create list", true, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                    let name = this.disc.lists.new_name.read(cx).value().trim().to_string();
+                    if name.is_empty() {
+                        this.error = Some("Enter a list name".into());
+                        cx.notify();
+                        return;
+                    }
+                    let fut = this.svc.create_trakt_list(name, None);
+                    cx.spawn(async move |this, cx| {
+                        let res = fut.await;
+                        this.update(cx, |this, cx| match res {
+                            Ok(list) => {
+                                this.status = Some(format!("Created list {}", list.name));
+                                this.refresh_lists_from_trakt(cx);
+                            }
+                            Err(e) => this.error = Some(e),
+                        })
+                        .ok();
+                    })
+                    .detach();
+                })));
+            if let ListScope::Custom(id) = &lists.scope {
+                let id_ren = id.clone();
+                let id_del = id.clone();
+                create_row = create_row
+                    .child(self.button("list-ren", "Rename", false, p).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        let name = this.disc.lists.new_name.read(cx).value().trim().to_string();
+                        if name.is_empty() {
+                            this.error = Some("Enter the new name first".into());
+                            cx.notify();
+                            return;
+                        }
+                        let fut = this.svc.rename_trakt_list(id_ren.clone(), name, None);
+                        cx.spawn(async move |this, cx| {
+                            let res = fut.await;
+                            this.update(cx, |this, cx| match res {
+                                Ok(list) => {
+                                    this.status = Some(format!("Renamed to {}", list.name));
+                                    this.refresh_lists_from_trakt(cx);
+                                }
+                                Err(e) => this.error = Some(e),
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    })))
+                    .child(self.button("list-del", "Delete list", false, p).text_color(rgb(p.danger)).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        let fut = this.svc.delete_trakt_list(id_del.clone());
+                        cx.spawn(async move |this, cx| {
+                            let res = fut.await;
+                            this.update(cx, |this, cx| match res {
+                                Ok(()) => {
+                                    this.disc.lists.scope = ListScope::Watchlist;
+                                    this.status = Some("List deleted".into());
+                                    this.refresh_lists_from_trakt(cx);
+                                }
+                                Err(e) => this.error = Some(e),
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    })));
+            }
+        }
+
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(toolbar)
+            .child(chips)
+            .child(div().flex().flex_wrap().gap_4().child(type_row).child(sort_row))
+            .child(create_row);
         if cards.is_empty() {
-            col = col.child(div().text_sm().text_color(rgb(p.muted)).child("Press W on any title to add it. Sync pulls your Trakt watchlist here."));
+            col = col.child(div().text_sm().text_color(rgb(p.muted)).child(
+                "Press W on any title for the watchlist. Sync lists pulls your named Trakt lists here.",
+            ));
         } else {
             col = col.child(self.grid(cards.iter().map(|c| self.title_card(c, "wl-page", 168.0, p, cx)).collect()));
         }

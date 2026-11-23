@@ -333,9 +333,16 @@ impl MediaHubView {
             trakt_actions = trakt_actions
                 .child(self.button("trakt-sync", "Sync now", true, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.trakt_sync(cx))))
                 .child(self.button("trakt-out", "Disconnect", false, p).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.trakt_disconnect(cx))));
+        } else if self.trakt_waiting {
+            trakt_actions = trakt_actions
+                .child(self.button("trakt-wait", "Waiting for browser…", false, p))
+                .child(
+                    self.button("trakt-cancel", "Cancel", true, p)
+                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.trakt_cancel_connect(cx))),
+                );
         } else {
             trakt_actions = trakt_actions.child(
-                self.button("trakt-in", if self.trakt_waiting { "Waiting for browser…" } else { "Connect" }, true, p)
+                self.button("trakt-in", "Connect", true, p)
                     .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.trakt_connect(cx))),
             );
         }
@@ -352,8 +359,41 @@ impl MediaHubView {
                 p,
             ))
             .child(trakt_actions)
+            .when(!self.trakt.logged_in && self.trakt.configured, |d| {
+                d.child(self.field(
+                    "OAuth code",
+                    "If the browser page can’t reach Aurivon, paste the code here",
+                    &self.trakt_code_input,
+                    p,
+                ))
+                .child(
+                    self.button("trakt-paste", "Use pasted code", false, p)
+                        .on_click(cx.listener(|this, _: &ClickEvent, w, cx| this.trakt_paste_code(w, cx))),
+                )
+            })
             .when(self.trakt.logged_in, |d| {
-                d.child(
+                let policy = cfg.trakt_watchlist_policy;
+                let mut policy_row = div().flex().flex_wrap().gap_2().items_center().child(
+                    div().text_xs().text_color(rgb(p.muted)).child("Watchlist sync:"),
+                );
+                for (pol, id, label) in [
+                    (rmh_app::TraktWatchlistPolicy::Merge, "merge", "Merge"),
+                    (rmh_app::TraktWatchlistPolicy::TraktWins, "trakt", "Trakt wins"),
+                    (rmh_app::TraktWatchlistPolicy::LocalWins, "local", "Local wins"),
+                ] {
+                    policy_row = policy_row.child(
+                        self.pill(
+                            SharedString::from(format!("trakt-wl-pol-{id}")),
+                            label.to_string(),
+                            policy == pol,
+                            p,
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                            this.update_config(|c| c.trakt_watchlist_policy = pol, false, cx);
+                        })),
+                    );
+                }
+                d.child(policy_row).child(
                     div().flex().gap_2().child(
                         self.button("trakt-wl-sync", "Sync watchlist", false, p)
                             .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.sync_watchlist_only(cx))),
